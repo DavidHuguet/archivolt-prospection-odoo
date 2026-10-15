@@ -8,8 +8,10 @@ Chaque exécution :
 3. Crée une activité « À faire » sur la tâche « Suivi commercial » avec la
    liste en note.
 
-Note technique : activity_schedule prend ses paramètres en kwargs
-(summary, note, date_deadline, act_type_id...), pas en dict positionnel.
+Notes techniques :
+- activity_schedule prend ses paramètres en kwargs.
+- « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
+  (période planifiée incluant aujourd'hui), pas une ancienne occurrence.
 """
 
 import os
@@ -93,13 +95,26 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
         def call(model: str, method: str, args: list, kwargs: dict | None = None):
             return models.execute_kw(odoo_db, uid, api_key, model, method, args, kwargs or {})
 
-        # 1. Tâche cible
+        # 1. Tâche cible : occurrence EN COURS de la tâche récurrente
+        #    (période planifiée incluant aujourd'hui), repli sur la plus récente
+        today = date.today().isoformat()
         tasks = call(
             "project.task",
             "search_read",
-            [[["name", "ilike", ODOO_TASK_NAME]], ["id", "name"]],
-            {"limit": 1},
+            [[
+                ["name", "ilike", ODOO_TASK_NAME],
+                ["date_start", "<=", f"{today} 23:59:59"],
+                ["date_end", ">=", f"{today} 00:00:00"],
+            ], ["id", "name"]],
+            {"limit": 1, "order": "id desc"},
         )
+        if not tasks:
+            tasks = call(
+                "project.task",
+                "search_read",
+                [[["name", "ilike", ODOO_TASK_NAME]], ["id", "name"]],
+                {"limit": 1, "order": "id desc"},
+            )
         if not tasks:
             raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
         task_id = tasks[0]["id"]
