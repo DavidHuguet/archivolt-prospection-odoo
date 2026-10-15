@@ -18,6 +18,7 @@ Notes techniques :
 
 import asyncio
 import os
+import re
 from datetime import date, timedelta
 
 import mistralai.workflows as workflows
@@ -88,15 +89,24 @@ async def generer_liste_entreprises(agent_id: str) -> str:
     return response.choices[0].message.content
 
 
+def _nettoyer_note(note: str) -> str:
+    """Nettoyage markdown résiduel : la note doit être du texte brut lisible."""
+    note = re.sub(r"#+\s*", "", note)                 # titres
+    note = note.replace("**", "").replace("__", "")   # gras
+    note = re.sub(r"^\s*[-*]\s+", "- ", note, flags=re.M)  # puces -> tiret simple
+    note = re.sub(r"\n{3,}", "\n\n", note)           # lignes vides multiples
+    return note
+
+
 @workflows.activity()
 async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooActivityResult:
     """Crée une activité « À faire » sur la tâche « Suivi commercial » d'Odoo (XML-RPC)."""
-    import re
     import xmlrpc.client
 
     api_key = os.environ["ODOO_API_KEY"]
     common_url = f"{ODOO_URL}/xmlrpc/2/common"
     object_url = f"{ODOO_URL}/xmlrpc/2/object"
+    note = _nettoyer_note(note)
 
     def _run() -> OdooActivityResult:
         common = xmlrpc.client.ServerProxy(common_url)
@@ -111,12 +121,6 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
 
         def call(model: str, method: str, args: list, kwargs: dict | None = None):
             return models.execute_kw(odoo_db, uid, api_key, model, method, args, kwargs or {})
-
-        # 0. Nettoyage markdown résiduel : la note doit être du texte brut lisible
-        note = re.sub(r"#+\s*", "", note)              # titres
-        note = note.replace("**", "").replace("__", "")  # gras
-        note = re.sub(r"^\s*[-*]\s+", "- ", note, flags=re.M)  # puces -> tiret simple
-        note = re.sub(r"\n{3,}", "\n\n", note)          # lignes vides multiples
 
         # 1. Tâche cible : occurrence EN COURS de la tâche récurrente.
         #    La plus récente dont le début est passé.
