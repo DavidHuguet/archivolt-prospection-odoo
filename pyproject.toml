@@ -1,0 +1,8 @@
+[project]
+name = "archivolt-prospection-odoo"
+version = "0.1.0"
+description = "Workflow Mistral : prospection data gouvernance régionale -> activité Odoo (Suivi commercial)"
+requires-python = ">=3.12"
+dependencies = [
+    "mistralai-workflows>=3.10",
+]
