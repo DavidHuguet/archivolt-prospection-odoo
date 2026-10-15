@@ -4,12 +4,15 @@ Chaque exécution :
 1. Génère une liste d'ETI / PME / startups en Bretagne, Pays de la Loire,
    Normandie et Nouvelle-Aquitaine qui recherchent des compétences en data
    gouvernance ou qui ont de gros projets data.
-2. Se connecte à l'Odoo Archi-Volt (API JSON-RPC, clé API dans le secret ODOO_API_KEY).
+2. Se connecte à l'Odoo Archi-Volt (session /web/session/authenticate,
+   clé API dans le secret ODOO_API_KEY).
 3. Crée une activité « À faire » sur la tâche « Suivi commercial » avec la
    liste en note.
 
-Note : les imports réseau (httpx) sont différés à l'intérieur des activités —
-le sandbox de workflow (Temporal) interdit les imports réseau au niveau module.
+Notes techniques :
+- Odoo 19 : common.authenticate plante avec une clé API (bug de cache,
+  "unhashable type: 'dict'") -> on passe par l'authentification par session.
+- Les imports réseau sont différés dans les activités (sandbox Temporal).
 """
 
 import os
@@ -45,23 +48,6 @@ class OdooActivityResult(BaseModel):
     task_id: int = 0
 
 
-def _jsonrpc(url: str, service: str, method: str, args: list) -> object:
-    """Appel JSON-RPC Odoo (endpoint /jsonrpc). httpx importé ici (pas de réseau dans le workflow)."""
-    import httpx
-
-    payload = {
-        "jsonrpc": "2.0",
-        "method": "call",
-        "params": {"service": service, "method": method, "args": args},
-    }
-    resp = httpx.post(url, json=payload, timeout=60)
-    resp.raise_for_status()
-    data = resp.json()
-    if "error" in data:
-        raise RuntimeError(f"Erreur Odoo JSON-RPC: {data['error']}")
-    return data.get("result")
-
-
 @workflows.activity()
 async def generer_liste_entreprises(agent_id: str) -> str:
     """Génère la liste de prospection via un agent Mistral (web search) ou le modèle seul."""
@@ -88,43 +74,68 @@ async def generer_liste_entreprises(agent_id: str) -> str:
 
 @workflows.activity()
 async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooActivityResult:
-    """Crée une activité « À faire » sur la tâche « Suivi commercial » d'Odoo (JSON-RPC)."""
+    """Crée une activité « À faire » sur la tâche « Suivi commercial » d'Odoo.
+
+    Authentification par session (/web/session/authenticate) puis appels
+    /web/dataset/call_kw avec le cookie de session.
+    """
     import asyncio
+    import httpx
 
     api_key = os.environ["ODOO_API_KEY"]
-    endpoint = f"{ODOO_URL}/jsonrpc"
 
     def _run() -> OdooActivityResult:
-        # 0. Authentification (service common)
-        uid = _jsonrpc(endpoint, "common", "authenticate", [odoo_db, odoo_user, api_key, {}])
-        if not uid:
-            raise RuntimeError("Authentification Odoo échouée (db/user/clé API)")
+        with httpx.Client(base_url=ODOO_URL, timeout=60) as client:
+            # 1. Authentification par session (gère aussi bien mot de passe que clé API)
+            resp = client.post(
+                "/web/session/authenticate",
+                json={"params": {"db": odoo_db, "login": odoo_user, "password": api_key}},
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            if "error" in data:
+                raise RuntimeError(f"Authentification Odoo échouée: {data['error']}")
+            uid = (data.get("result") or {}).get("uid")
+            if not uid:
+                raise RuntimeError("Authentification Odoo échouée (db/user/clé API)")
 
-        def call(model: str, method: str, args: list):
-            return _jsonrpc(endpoint, "object", "execute_kw", [odoo_db, uid, api_key, model, method, args])
+            def call(model: str, method: str, args: list):
+                r = client.post(
+                    "/web/dataset/call_kw",
+                    json={
+                        "jsonrpc": "2.0",
+                        "method": "call",
+                        "params": {"model": model, "method": method, "args": args, "kwargs": {}},
+                    },
+                )
+                r.raise_for_status()
+                d = r.json()
+                if "error" in d:
+                    raise RuntimeError(f"Erreur Odoo {model}.{method}: {d['error']}")
+                return d.get("result")
 
-        # 1. Tâche cible
-        task_ids = call("project.task", "search", [[["name", "ilike", ODOO_TASK_NAME]]])
-        if not task_ids:
-            raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
-        task_id = task_ids[0]
+            # 2. Tâche cible
+            task_ids = call("project.task", "search", [[["name", "ilike", ODOO_TASK_NAME]]])
+            if not task_ids:
+                raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
+            task_id = task_ids[0]
 
-        # 2. Type d'activité « À faire » (repli : type par défaut)
-        type_ids = call(
-            "mail.activity.type",
-            "search",
-            [[["name", "ilike", ODOO_ACTIVITY_TYPE_NAME], ["active", "=", True]]],
-        )
-        type_kw = {"activity_type_id": type_ids[0]} if type_ids else {}
+            # 3. Type d'activité « À faire » (repli : type par défaut)
+            type_ids = call(
+                "mail.activity.type",
+                "search",
+                [[["name", "ilike", ODOO_ACTIVITY_TYPE_NAME], ["active", "=", True]]],
+            )
+            type_kw = {"activity_type_id": type_ids[0]} if type_ids else {}
 
-        # 3. Création de l'activité planifiée sous 7 jours
-        due = (date.today() + timedelta(days=7)).isoformat()
-        call(
-            "project.task",
-            "activity_schedule",
-            [[task_id], {**type_kw, "summary": "Prospection data gouvernance - entreprises régionales", "note": note[:60000], "date_deadline": due}],
-        )
-        return OdooActivityResult(activity_id=0, task_id=task_id)
+            # 4. Création de l'activité planifiée sous 7 jours
+            due = (date.today() + timedelta(days=7)).isoformat()
+            call(
+                "project.task",
+                "activity_schedule",
+                [[task_id], {**type_kw, "summary": "Prospection data gouvernance - entreprises régionales", "note": note[:60000], "date_deadline": due}],
+            )
+            return OdooActivityResult(activity_id=0, task_id=task_id)
 
     return await asyncio.to_thread(_run)
 
