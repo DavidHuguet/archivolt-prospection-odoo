@@ -11,8 +11,8 @@ Chaque exécution :
 Notes techniques :
 - activity_schedule prend ses paramètres en kwargs.
 - « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
-  (période planifiée incluant aujourd'hui), pas une ancienne occurrence.
-- Odoo 17+ : les dates de tâche sont planned_date_begin / planned_date_end.
+  (la plus récente dont le début est passé), pas une ancienne occurrence.
+- Odoo 17+ : planned_date_begin existe, planned_date_end non (v19).
 - Mode test : si input.note_test est fournie, la génération est sautée et la
   note est utilisée telle quelle (test rapide de la partie Odoo seule).
 """
@@ -100,8 +100,9 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
         def call(model: str, method: str, args: list, kwargs: dict | None = None):
             return models.execute_kw(odoo_db, uid, api_key, model, method, args, kwargs or {})
 
-        # 1. Tâche cible : occurrence EN COURS de la tâche récurrente
-        #    (période planifiée incluant aujourd'hui), repli sur la plus récente
+        # 1. Tâche cible : occurrence EN COURS de la tâche récurrente.
+        #    La plus récente dont le début est passé (planned_date_end
+        #    n'existe pas en Odoo 19, on se cale sur le début).
         today = date.today().isoformat()
         tasks = call(
             "project.task",
@@ -109,9 +110,8 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             [[
                 ["name", "ilike", ODOO_TASK_NAME],
                 ["planned_date_begin", "<=", f"{today} 23:59:59"],
-                ["planned_date_end", ">=", f"{today} 00:00:00"],
             ], ["id", "name"]],
-            {"limit": 1, "order": "id desc"},
+            {"limit": 1, "order": "planned_date_begin desc"},
         )
         if not tasks:
             tasks = call(
