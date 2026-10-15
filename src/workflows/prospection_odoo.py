@@ -7,9 +7,6 @@ Chaque exécution :
 2. Se connecte à l'Odoo Archi-Volt (API JSON-RPC, clé API dans le secret ODOO_API_KEY).
 3. Crée une activité « À faire » sur la tâche « Suivi commercial » avec la
    liste en note.
-
-Note : l'API Odoo est exposée à la racine du domaine (sans le préfixe /odoo,
-réservé à l'interface web derrière le reverse-proxy).
 """
 
 import os
@@ -19,7 +16,7 @@ import httpx
 import mistralai.workflows as workflows
 from pydantic import BaseModel
 
-ODOO_URL = os.environ.get("ODOO_URL", "https://www.archi-volt.eu").rstrip("/")
+ODOO_URL = os.environ.get("ODOO_URL", "https://archi-volt.odoo.com").rstrip("/")
 ODOO_TASK_NAME = os.environ.get("ODOO_TASK_NAME", "Suivi commercial")
 ODOO_ACTIVITY_TYPE_NAME = os.environ.get("ODOO_ACTIVITY_TYPE_NAME", "À faire")
 
