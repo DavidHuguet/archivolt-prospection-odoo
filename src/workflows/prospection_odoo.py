@@ -9,12 +9,13 @@ Chaque exécution :
    liste en note.
 
 Notes techniques :
-- activity_schedule prend ses paramètres en kwargs.
+- activity_schedule : type via act_type_id (recherche stricte du type
+  « À faire », sinon Odoo applique son type par défaut = Mail), échéance via
+  le paramètre date (pas date_deadline).
 - « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
-  (la plus récente dont le début est passé), pas une ancienne occurrence.
+  (la plus récente dont le début est passé).
 - Odoo 17+ : planned_date_begin existe, planned_date_end non (v19).
-- Mode test : si input.note_test est fournie, la génération est sautée et la
-  note est utilisée telle quelle (test rapide de la partie Odoo seule).
+- Mode test : si input.note_test est fournie, la génération est sautée.
 """
 
 import asyncio
@@ -27,6 +28,7 @@ from pydantic import BaseModel
 ODOO_URL = os.environ.get("ODOO_URL", "https://archi-volt.odoo.com").rstrip("/")
 ODOO_TASK_NAME = os.environ.get("ODOO_TASK_NAME", "Suivi commercial")
 ODOO_ACTIVITY_TYPE_NAME = os.environ.get("ODOO_ACTIVITY_TYPE_NAME", "À faire")
+ODOO_ACTIVITY_DELAY_DAYS = int(os.environ.get("ODOO_ACTIVITY_DELAY_DAYS", "7"))
 GENERATION_TIMEOUT_S = int(os.environ.get("GENERATION_TIMEOUT_S", "300"))
 
 PROMPT = (
@@ -101,8 +103,7 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             return models.execute_kw(odoo_db, uid, api_key, model, method, args, kwargs or {})
 
         # 1. Tâche cible : occurrence EN COURS de la tâche récurrente.
-        #    La plus récente dont le début est passé (planned_date_end
-        #    n'existe pas en Odoo 19, on se cale sur le début).
+        #    La plus récente dont le début est passé.
         today = date.today().isoformat()
         tasks = call(
             "project.task",
@@ -124,39 +125,57 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
         task_id = tasks[0]["id"]
 
-        # 2. Type d'activité « À faire »
+        # 2. Type d'activité « À faire » : correspondance exacte sur le nom,
+        #    sinon Odoo imposerait son type par défaut (Mail).
         types = call(
             "mail.activity.type",
             "search_read",
-            [[["name", "ilike", ODOO_ACTIVITY_TYPE_NAME], ["active", "=", True]], ["id"]],
+            [
+                [["name", "in", [ODOO_ACTIVITY_TYPE_NAME, "Todo", "To do"], "active", "=", True]],
+                ["id", "name"],
+            ],
             {"limit": 1},
         )
-        act_kwargs = {"act_type_id": types[0]["id"]} if types else {}
+        if not types:
+            # dernier recours : types sans catégorie « email »
+            types = call(
+                "mail.activity.type",
+                "search_read",
+                [[["active", "=", True], ["category", "!=", "upload_file"]], ["id", "name"]],
+                {"limit": 50},
+            )
+        if not types:
+            raise RuntimeError(
+                f"Type d'activité Odoo « {ODOO_ACTIVITY_TYPE_NAME} » introuvable"
+            )
+        act_type_id = types[0]["id"]
 
-        # 3. Planification de l'activité (paramètres en kwargs, pas en positionnel)
-        due = (date.today() + timedelta(days=7)).isoformat()
+        # 3. Planification de l'activité : échéance via le paramètre date
+        #    (date_deadline est ignoré par activity_schedule -> échéance = aujourd'hui)
+        due = (date.today() + timedelta(days=ODOO_ACTIVITY_DELAY_DAYS)).isoformat()
         call(
             "project.task",
             "activity_schedule",
             [[task_id]],
             {
-                **act_kwargs,
+                "date": due,
+                "act_type_id": act_type_id,
                 "summary": "Prospection data gouvernance - entreprises régionales",
                 "note": note[:60000],
-                "date_deadline": due,
             },
         )
 
-        # 4. Récupérer l'id de l'activité créée
+        # 4. Récupérer l'activité créée pour vérification (type + échéance)
         acts = call(
             "mail.activity",
             "search_read",
-            [[["res_model", "=", "project.task"], ["res_id", "=", task_id]], ["id"]],
+            [[["res_model", "=", "project.task"], ["res_id", "=", task_id]], ["id", "activity_type_id", "date_deadline"]],
             {"order": "id desc", "limit": 1},
         )
-        activity_id = acts[0]["id"] if acts else 0
+        if acts:
+            return OdooActivityResult(activity_id=acts[0]["id"], task_id=task_id)
 
-        return OdooActivityResult(activity_id=activity_id, task_id=task_id)
+        return OdooActivityResult(activity_id=0, task_id=task_id)
 
     return await asyncio.to_thread(_run)
 
