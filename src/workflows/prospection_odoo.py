@@ -6,12 +6,11 @@ Chaque exécution :
    gouvernance ou qui ont de gros projets data.
 2. Se connecte à l'Odoo Archi-Volt (API externe XML-RPC, clé API dans ODOO_API_KEY).
 3. Crée une activité « À faire » sur la tâche « Suivi commercial » avec la
-   liste en note, échéance à J+7.
+   liste en note, échéance à la date du jour.
 
 Notes techniques :
 - Odoo 19 : mail.activity.create avec res_model_id (ir.model) + res_id,
-  activity_type_id, date_deadline. activity_schedule (bug cache) et le
-  paramètre date (invalide en v19) sont évités.
+  activity_type_id, date_deadline.
 - « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
   (la plus récente dont le début est passé).
 - Mode test : si input.note_test est fournie, la génération est sautée.
@@ -27,7 +26,7 @@ from pydantic import BaseModel
 ODOO_URL = os.environ.get("ODOO_URL", "https://archi-volt.odoo.com").rstrip("/")
 ODOO_TASK_NAME = os.environ.get("ODOO_TASK_NAME", "Suivi commercial")
 ODOO_ACTIVITY_TYPE_NAME = os.environ.get("ODOO_ACTIVITY_TYPE_NAME", "À faire")
-ODOO_ACTIVITY_DELAY_DAYS = int(os.environ.get("ODOO_ACTIVITY_DELAY_DAYS", "7"))
+ODOO_ACTIVITY_DELAY_DAYS = int(os.environ.get("ODOO_ACTIVITY_DELAY_DAYS", "0"))
 GENERATION_TIMEOUT_S = int(os.environ.get("GENERATION_TIMEOUT_S", "300"))
 
 PROMPT = (
@@ -159,7 +158,7 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             raise RuntimeError("ir.model project.task introuvable")
         res_model_id = model_ids[0]["id"]
 
-        # 4. Création directe de l'activité (champs Odoo 19)
+        # 4. Création directe de l'activité (champs Odoo 19), échéance = J+0
         due = (date.today() + timedelta(days=ODOO_ACTIVITY_DELAY_DAYS)).isoformat()
         activity_id = call(
             "mail.activity",
