@@ -3,7 +3,7 @@ FROM python:3.12-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir "mistralai-workflows[mistralai]>=3.10" "mistralai>=1.9"
+    && pip install --no-cache-dir "mistralai-workflows>=3.10" "mistralai-workflows-plugins-mistralai" "mistralai>=1.9"
 
 COPY src ./src
 COPY worker.py .

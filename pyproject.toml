@@ -4,5 +4,6 @@ version = "0.1.0"
 description = "Workflow Mistral : prospection data gouvernance régionale -> activité Odoo (Suivi commercial)"
 requires-python = ">=3.12"
 dependencies = [
-    "mistralai-workflows[mistralai]>=3.10",
+    "mistralai-workflows>=3.10",
+    "mistralai-workflows-plugins-mistralai",
 ]
