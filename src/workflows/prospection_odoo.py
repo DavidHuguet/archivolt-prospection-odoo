@@ -13,7 +13,8 @@ Notes techniques :
 - « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
   (période planifiée incluant aujourd'hui), pas une ancienne occurrence.
 - Odoo 17+ : les dates de tâche sont planned_date_begin / planned_date_end.
-- Génération avec timeout (5 min) pour éviter les exécutions bloquées.
+- Mode test : si input.note_test est fournie, la génération est sautée et la
+  note est utilisée telle quelle (test rapide de la partie Odoo seule).
 """
 
 import asyncio
@@ -44,6 +45,7 @@ class ProspectionInput(BaseModel):
     odoo_db: str = ""
     odoo_user: str = ""
     agent_id: str = ""
+    note_test: str = ""  # mode test : si remplie, saute la génération
 
 
 class OdooActivityResult(BaseModel):
@@ -53,14 +55,12 @@ class OdooActivityResult(BaseModel):
 
 @workflows.activity()
 async def generer_liste_entreprises(agent_id: str) -> str:
-    """Génère la liste de prospection via un agent Mistral ou le modèle, avec timeout."""
+    """Génère la liste de prospection via un agent Mistral ou le modèle."""
     from mistralai.workflows.client import get_mistral_client
 
     mistral = get_mistral_client()
 
-    async def _via_agent() -> str | None:
-        if not agent_id:
-            return None
+    if agent_id:
         try:
             response = await mistral.agents.complete_async(
                 agent_id=agent_id,
@@ -68,18 +68,13 @@ async def generer_liste_entreprises(agent_id: str) -> str:
             )
             return response.choices[0].message.content
         except Exception:
-            return None
+            pass  # repli sur le chat simple ci-dessous
 
-    async def _via_chat() -> str:
-        response = await mistral.chat.complete_async(
-            model="mistral-small-latest",
-            messages=[{"role": "user", "content": PROMPT}],
-        )
-        return response.choices[0].message.content
-
-    via_agent = await _via_agent()
-    result = via_agent if via_agent else await _via_chat()
-    return await asyncio.wait_for(asyncio.to_thread(lambda: result), timeout=None) if False else result
+    response = await mistral.chat.complete_async(
+        model="mistral-small-latest",
+        messages=[{"role": "user", "content": PROMPT}],
+    )
+    return response.choices[0].message.content
 
 
 @workflows.activity()
@@ -178,17 +173,22 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
 class ProspectionOdooWorkflow:
     @workflows.workflow.entrypoint
     async def run(self, input: ProspectionInput) -> dict:
-        try:
-            liste = await asyncio.wait_for(generer_liste_entreprises(input.agent_id), timeout=GENERATION_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                f"Génération de la liste interrompue : dépassé {GENERATION_TIMEOUT_S}s. "
-                "Relance l'exécution ou augmente GENERATION_TIMEOUT_S."
-            )
+        # Mode test : note fournie -> pas de génération
+        if input.note_test:
+            liste = input.note_test
+        else:
+            try:
+                liste = await asyncio.wait_for(generer_liste_entreprises(input.agent_id), timeout=GENERATION_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"Génération de la liste interrompue : dépassé {GENERATION_TIMEOUT_S}s. "
+                    "Relance l'exécution ou augmente GENERATION_TIMEOUT_S."
+                )
         result = await creer_activite_odoo(liste, input.odoo_db, input.odoo_user)
         return {
             "odoo_task_id": result.task_id,
             "activity_id": result.activity_id,
             "activite": "créée",
+            "mode_test": bool(input.note_test),
             "apercu_note": liste[:500],
         }
