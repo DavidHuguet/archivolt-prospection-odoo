@@ -92,13 +92,10 @@ async def generer_liste_entreprises(agent_id: str) -> str:
 
 def _nettoyer_note(note: str) -> str:
     """Nettoyage markdown résiduel : la note doit être du texte brut lisible."""
-    note = re.sub(r"#+s*", "", note)                 # titres
-    note = note.replace("**", "").replace("__", "")   # gras
-    note = re.sub(r"^s*[-*]s+", "- ", note, flags=re.M)  # puces -> tiret simple
-    note = re.sub(r"
-{3,}", "
-
-", note)           # lignes vides multiples
+    note = re.sub(r"#+\s*", "", note)
+    note = note.replace("**", "").replace("__", "")
+    note = re.sub(r"^[ \t]*[-*][ \t]+", "- ", note, flags=re.M)
+    note = re.sub(r"\n{3,}", "\n\n", note)
     return note
 
 
