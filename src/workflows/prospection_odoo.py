@@ -17,6 +17,8 @@ Notes techniques :
   (la plus récente dont le début est passé).
 - Mode test : si input.note_test est fournie, la génération est sautée.
 - Mode diagnostic : note_test = "DUMP_TYPES" -> liste les types d'activité Odoo.
+- Mode génération seule : note_test = "GEN_ONLY" -> renvoie la liste générée
+  (avec recherche web) sans rien écrire dans Odoo.
 """
 
 import asyncio
@@ -264,6 +266,15 @@ class ProspectionOdooWorkflow:
         if input.note_test == "DUMP_TYPES":
             dump = await lister_types_activite(input.odoo_db, input.odoo_user)
             return {"diagnostic_types": dump}
+        # Mode génération seule : liste renvoyée, rien d'écrit dans Odoo
+        if input.note_test == "GEN_ONLY":
+            try:
+                liste = await asyncio.wait_for(generer_liste_entreprises(input.agent_id), timeout=GENERATION_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"Génération interrompue : dépassé {GENERATION_TIMEOUT_S}s."
+                )
+            return {"generation_seule": liste}
         # Mode test : note fournie -> pas de génération
         if input.note_test:
             liste = input.note_test
