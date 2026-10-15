@@ -1,9 +1,10 @@
 """Workflow Archi-Volt : prospection data gouvernance régionale -> activité Odoo.
 
 Chaque exécution :
-1. Lance une recherche web sur les entreprises régionales (Bretagne, Pays de
-   la Loire, Normandie, Nouvelle-Aquitaine) recrutant en data gouvernance ou
-   portant de gros projets data — signaux des 6 derniers mois uniquement.
+1. Lance une recherche web (WebSearchTool, exécuté côté plateforme Mistral)
+   sur les entreprises régionales (Bretagne, Pays de la Loire, Normandie,
+   Nouvelle-Aquitaine) recrutant en data gouvernance ou portant de gros
+   projets data — signaux des 6 derniers mois uniquement.
 2. Génère à partir des résultats une liste de prospection en texte brut avec
    fiche entreprise (SIREN, siège, APE, effectifs, CA).
 3. Se connecte à l'Odoo Archi-Volt (API externe XML-RPC, clé API dans ODOO_API_KEY).
@@ -11,6 +12,8 @@ Chaque exécution :
    avec la liste en note, échéance à la date du jour.
 
 Notes techniques :
+- Recherche web : agent workflows (mistralai.workflows.plugins.mistralai)
+  avec WebSearchTool() et RemoteSession (LocalSession ignorerait l'outil).
 - Odoo 19 : mail.activity.create avec res_model_id (ir.model) + res_id,
   activity_type_id, date_deadline.
 - Le type « À faire » de l'interface FR s'appelle « To-Do » en base.
@@ -34,7 +37,8 @@ ODOO_URL = os.environ.get("ODOO_URL", "https://archi-volt.odoo.com").rstrip("/")
 ODOO_TASK_NAME = os.environ.get("ODOO_TASK_NAME", "Suivi commercial")
 ODOO_ACTIVITY_TYPE_NAME = os.environ.get("ODOO_ACTIVITY_TYPE_NAME", "To-Do")
 ODOO_ACTIVITY_DELAY_DAYS = int(os.environ.get("ODOO_ACTIVITY_DELAY_DAYS", "0"))
-GENERATION_TIMEOUT_S = int(os.environ.get("GENERATION_TIMEOUT_S", "300"))
+GENERATION_TIMEOUT_S = int(os.environ.get("GENERATION_TIMEOUT_S", "600"))
+GEN_MODEL = os.environ.get("GEN_MODEL", "mistral-medium-latest")
 
 PROMPT = (
     "Génère une liste de prospection pour un cabinet de conseil indépendant en "
@@ -48,19 +52,19 @@ PROMPT = (
     "recrutements annoncés dans les 6 derniers mois). Ignore tout signal plus "
     "ancien. Si une information d'entreprise n'est pas vérifiable dans les "
     "6 derniers mois, ne l'inclus pas. "
-    "Appuie-toi sur les résultats de recherche web fournis (offres d'emploi, "
+    "Appuie-toi sur les résultats de ta recherche web (offres d'emploi, "
     "actualités, projets annoncés) ; pour chaque entreprise, cite la source "
     "(site / média et date) entre parenthèses après le champ Pourquoi. "
-    "FICHE ENTREPRISE OBLIGATOIRE : pour chaque entreprise, indique le numéro "
-    "SIREN, la ville du siège social, le code APE avec son libellé, le nombre "
-    "d'employés (dernier connu, préciser l'année) et le dernier chiffre "
-    "d'affaires connu (préciser l'année). Si une information est introuvable, "
-    "écris 'non trouvé' pour ce champ plutôt qu'une invention. "
+    "FICHE ENTREPRISE OBLIGATOIRE : pour chaque entreprise, recherche son "
+    "numéro SIREN, la ville du siège social, son code APE avec son libellé, "
+    "son nombre d'employés (dernier connu, préciser l'année) et son dernier "
+    "chiffre d'affaires connu (préciser l'année). Si une information est "
+    "introuvable, écris 'non trouvé' pour ce champ plutôt qu'une invention. "
     "FORMAT DE SORTIE IMPÉRATIF : texte brut, sans aucun markdown (pas de #, "
     "pas de **, pas de tableaux, pas de puces markdown). "
     "Structure exacte : "
     "une première ligne 'PROSPECTION DATA GOUVERNANCE - ENTREPRISES REGIONALES' ; "
-    "puis pour chaque entreprise, un bloc numéroté sur 7 lignes : "
+    "puis pour chaque entreprise, un bloc numéroté sur 6 lignes : "
     "ligne 1 : numéro. Nom - Région : ... - Secteur : ... ; "
     "ligne 2 : ligne de tirets ; "
     "ligne 3 : 'SIREN : ... - Siège : ... - APE : ... (libellé)' ; "
@@ -88,43 +92,44 @@ class OdooActivityResult(BaseModel):
 
 @workflows.activity()
 async def generer_liste_entreprises(agent_id: str) -> str:
-    """Recherche web puis génération de la liste de prospection.
+    """Génération de la liste de prospection avec recherche web réelle.
 
-    1. Recherche web (outil natif Mistral) sur les recrutements et projets
-       data gouvernance dans les régions cibles (6 derniers mois).
-    2. Synthèse en liste structurée avec fiche entreprise, à partir des
-       résultats sourcés.
-    Repli : appel simple sans recherche si l'outil web n'est pas disponible.
+    Utilise un agent workflows avec WebSearchTool() via RemoteSession :
+    l'outil de recherche est exécuté côté plateforme Mistral. En cas d'échec,
+    erreur explicite (pas de repli mémoire silencieux).
     """
-    from mistralai.workflows.client import get_mistral_client
+    import mistralai.workflows.plugins.mistralai as workflows_mistralai
+    from mistralai.client.models import WebSearchTool
 
-    mistral = get_mistral_client()
-
-    if agent_id:
-        try:
-            response = await mistral.agents.complete_async(
-                agent_id=agent_id,
-                messages=[{"role": "user", "content": PROMPT}],
-            )
-            return response.choices[0].message.content
-        except Exception:
-            pass  # repli sur la recherche web ci-dessous
-
-    try:
-        response = await mistral.chat.complete_async(
-            model="mistral-small-latest",
-            messages=[{"role": "user", "content": PROMPT}],
-            tools=[{"type": "web_search"}],
-        )
-        return response.choices[0].message.content
-    except Exception:
-        pass  # repli : sans recherche web (mémoire du modèle)
-
-    response = await mistral.chat.complete_async(
-        model="mistral-small-latest",
-        messages=[{"role": "user", "content": PROMPT}],
+    agent = workflows_mistralai.Agent(
+        id=agent_id or None,
+        model=GEN_MODEL,
+        name="archivolt-prospection-websearch",
+        description=(
+            "Recherche web de prospection data gouvernance (régions Ouest & Sud-Ouest)"
+        ),
+        instructions=(
+            "Tu es un assistant de prospection B2B pour Archi-Volt, cabinet de "
+            "conseil indépendant en data gouvernance. Utilise la recherche web "
+            "pour trouver des signaux récents (6 derniers mois) : offres d'emploi, "
+            "annonces de projets, actualités. Réponds toujours en texte brut "
+            "structuré, sans markdown, avec les sources citées."
+        ),
+        tools=[WebSearchTool()],
     )
-    return response.choices[0].message.content
+    session = workflows_mistralai.RemoteSession()
+    outputs = await workflows_mistralai.Runner.run(
+        agent=agent,
+        inputs=PROMPT,
+        session=session,
+    )
+    # Runner.run renvoie les outputs de l'agent : texte final
+    if isinstance(outputs, str):
+        return outputs
+    for attr in ("content", "text", "output"):
+        if hasattr(outputs, attr):
+            return getattr(outputs, attr)
+    return str(outputs)
 
 
 def _nettoyer_note(note: str) -> str:
