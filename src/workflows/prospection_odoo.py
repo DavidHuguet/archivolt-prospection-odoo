@@ -4,14 +4,13 @@ Chaque exécution :
 1. Génère une liste d'ETI / PME / startups en Bretagne, Pays de la Loire,
    Normandie et Nouvelle-Aquitaine qui recherchent des compétences en data
    gouvernance ou qui ont de gros projets data.
-2. Se connecte à l'Odoo Archi-Volt (session /web/session/authenticate,
-   clé API dans le secret ODOO_API_KEY).
+2. Se connecte à l'Odoo Archi-Volt (API externe XML-RPC, clé API dans ODOO_API_KEY).
 3. Crée une activité « À faire » sur la tâche « Suivi commercial » avec la
    liste en note.
 
 Notes techniques :
-- Odoo 19 : common.authenticate plante avec une clé API (bug de cache,
-  "unhashable type: 'dict'") -> on passe par l'authentification par session.
+- Les clés API Odoo passent par l'API externe XML-RPC (endpoint /xmlrpc/2),
+  pas par /web/session/authenticate (login interactif -> Access Denied).
 - Les imports réseau sont différés dans les activités (sandbox Temporal).
 """
 
@@ -74,68 +73,58 @@ async def generer_liste_entreprises(agent_id: str) -> str:
 
 @workflows.activity()
 async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooActivityResult:
-    """Crée une activité « À faire » sur la tâche « Suivi commercial » d'Odoo.
-
-    Authentification par session (/web/session/authenticate) puis appels
-    /web/dataset/call_kw avec le cookie de session.
-    """
+    """Crée une activité « À faire » sur la tâche « Suivi commercial » d'Odoo (XML-RPC)."""
     import asyncio
-    import httpx
+    import xmlrpc.client
 
     api_key = os.environ["ODOO_API_KEY"]
+    common_url = f"{ODOO_URL}/xmlrpc/2/common"
+    object_url = f"{ODOO_URL}/xmlrpc/2/object"
 
     def _run() -> OdooActivityResult:
-        with httpx.Client(base_url=ODOO_URL, timeout=60) as client:
-            # 1. Authentification par session (gère aussi bien mot de passe que clé API)
-            resp = client.post(
-                "/web/session/authenticate",
-                json={"params": {"db": odoo_db, "login": odoo_user, "password": api_key}},
+        common = xmlrpc.client.ServerProxy(common_url)
+
+        # Version du serveur (diagnostic)
+        try:
+            version = common.version()
+        except Exception as e:
+            raise RuntimeError(f"Odoo injoignable sur {common_url}: {e}")
+
+        uid = common.authenticate(odoo_db, odoo_user, api_key, {})
+        if not uid:
+            raise RuntimeError(
+                f"Authentification Odoo refusée (uid=False). "
+                f"Vérifie : nom de base='{odoo_db}', utilisateur='{odoo_user}', "
+                f"clé API (secret ODOO_API_KEY). Serveur: {version.get('server_version')}"
             )
-            resp.raise_for_status()
-            data = resp.json()
-            if "error" in data:
-                raise RuntimeError(f"Authentification Odoo échouée: {data['error']}")
-            uid = (data.get("result") or {}).get("uid")
-            if not uid:
-                raise RuntimeError("Authentification Odoo échouée (db/user/clé API)")
 
-            def call(model: str, method: str, args: list):
-                r = client.post(
-                    "/web/dataset/call_kw",
-                    json={
-                        "jsonrpc": "2.0",
-                        "method": "call",
-                        "params": {"model": model, "method": method, "args": args, "kwargs": {}},
-                    },
-                )
-                r.raise_for_status()
-                d = r.json()
-                if "error" in d:
-                    raise RuntimeError(f"Erreur Odoo {model}.{method}: {d['error']}")
-                return d.get("result")
+        models = xmlrpc.client.ServerProxy(object_url)
 
-            # 2. Tâche cible
-            task_ids = call("project.task", "search", [[["name", "ilike", ODOO_TASK_NAME]]])
-            if not task_ids:
-                raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
-            task_id = task_ids[0]
+        def call(model: str, method: str, args: list):
+            return models.execute_kw(odoo_db, uid, api_key, model, method, args)
 
-            # 3. Type d'activité « À faire » (repli : type par défaut)
-            type_ids = call(
-                "mail.activity.type",
-                "search",
-                [[["name", "ilike", ODOO_ACTIVITY_TYPE_NAME], ["active", "=", True]]],
-            )
-            type_kw = {"activity_type_id": type_ids[0]} if type_ids else {}
+        # 1. Tâche cible
+        task_ids = call("project.task", "search", [[["name", "ilike", ODOO_TASK_NAME]]])
+        if not task_ids:
+            raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
+        task_id = task_ids[0]
 
-            # 4. Création de l'activité planifiée sous 7 jours
-            due = (date.today() + timedelta(days=7)).isoformat()
-            call(
-                "project.task",
-                "activity_schedule",
-                [[task_id], {**type_kw, "summary": "Prospection data gouvernance - entreprises régionales", "note": note[:60000], "date_deadline": due}],
-            )
-            return OdooActivityResult(activity_id=0, task_id=task_id)
+        # 2. Type d'activité « À faire » (repli : type par défaut)
+        type_ids = call(
+            "mail.activity.type",
+            "search",
+            [[["name", "ilike", ODOO_ACTIVITY_TYPE_NAME], ["active", "=", True]]],
+        )
+        type_kw = {"activity_type_id": type_ids[0]} if type_ids else {}
+
+        # 3. Création de l'activité planifiée sous 7 jours
+        due = (date.today() + timedelta(days=7)).isoformat()
+        call(
+            "project.task",
+            "activity_schedule",
+            [[task_id], {**type_kw, "summary": "Prospection data gouvernance - entreprises régionales", "note": note[:60000], "date_deadline": due}],
+        )
+        return OdooActivityResult(activity_id=0, task_id=task_id)
 
     return await asyncio.to_thread(_run)
 
