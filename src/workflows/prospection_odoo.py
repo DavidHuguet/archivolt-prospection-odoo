@@ -6,12 +6,12 @@ Chaque exécution :
    gouvernance ou qui ont de gros projets data.
 2. Se connecte à l'Odoo Archi-Volt (API externe XML-RPC, clé API dans ODOO_API_KEY).
 3. Crée une activité « À faire » sur la tâche « Suivi commercial » avec la
-   liste en note.
+   liste en note, échéance à J+7.
 
 Notes techniques :
-- activity_schedule : type via act_type_id (recherche stricte du type
-  « À faire », sinon Odoo applique son type par défaut = Mail), échéance via
-  le paramètre date (pas date_deadline).
+- Odoo 19 : mail.activity.create avec res_model_id (ir.model) + res_id,
+  activity_type_id, date_deadline. activity_schedule (bug cache) et le
+  paramètre date (invalide en v19) sont évités.
 - « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
   (la plus récente dont le début est passé).
 - Mode test : si input.note_test est fournie, la génération est sautée.
@@ -136,7 +136,6 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             {"limit": 1},
         )
         if not types:
-            # dernier recours : le premier type actif disponible
             types = call(
                 "mail.activity.type",
                 "search_read",
@@ -149,32 +148,34 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             )
         act_type_id = types[0]["id"]
 
-        # 3. Planification de l'activité : échéance via le paramètre date
-        #    (date_deadline est ignoré par activity_schedule)
+        # 3. ir.model id de project.task (Odoo 19 : res_model_id, pas res_model)
+        model_ids = call(
+            "ir.model",
+            "search_read",
+            [[["model", "=", "project.task"]], ["id"]],
+            {"limit": 1},
+        )
+        if not model_ids:
+            raise RuntimeError("ir.model project.task introuvable")
+        res_model_id = model_ids[0]["id"]
+
+        # 4. Création directe de l'activité (champs Odoo 19)
         due = (date.today() + timedelta(days=ODOO_ACTIVITY_DELAY_DAYS)).isoformat()
-        call(
-            "project.task",
-            "activity_schedule",
-            [[task_id]],
-            {
-                "date": due,
-                "act_type_id": act_type_id,
+        activity_id = call(
+            "mail.activity",
+            "create",
+            [{
+                "res_model_id": res_model_id,
+                "res_id": task_id,
+                "activity_type_id": act_type_id,
                 "summary": "Prospection data gouvernance - entreprises régionales",
                 "note": note[:60000],
-            },
+                "date_deadline": due,
+                "user_id": uid,
+            }],
         )
 
-        # 4. Récupérer l'activité créée pour vérification (type + échéance)
-        acts = call(
-            "mail.activity",
-            "search_read",
-            [[["res_model", "=", "project.task"], ["res_id", "=", task_id]], ["id", "activity_type_id", "date_deadline"]],
-            {"order": "id desc", "limit": 1},
-        )
-        if acts:
-            return OdooActivityResult(activity_id=acts[0]["id"], task_id=task_id)
-
-        return OdooActivityResult(activity_id=0, task_id=task_id)
+        return OdooActivityResult(activity_id=activity_id, task_id=task_id)
 
     return await asyncio.to_thread(_run)
 
