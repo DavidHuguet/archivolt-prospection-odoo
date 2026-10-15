@@ -1,18 +1,18 @@
 """Workflow Archi-Volt : prospection data gouvernance régionale -> activité Odoo.
 
 Chaque exécution :
-1. Génère une liste d'ETI / PME / startups en Bretagne, Pays de la Loire,
-   Normandie et Nouvelle-Aquitaine qui recherchent des compétences en data
-   gouvernance ou qui ont de gros projets data.
-2. Se connecte à l'Odoo Archi-Volt (API externe XML-RPC, clé API dans ODOO_API_KEY).
-3. Crée une activité « À faire » (type To-Do) sur la tâche « Suivi commercial »
-   avec la liste en note (texte brut lisible, pas de markdown), échéance à la
-   date du jour.
+1. Lance une recherche web sur les entreprises régionales (Bretagne, Pays de
+   la Loire, Normandie, Nouvelle-Aquitaine) recrutant en data gouvernance ou
+   portant de gros projets data.
+2. Génère à partir des résultats une liste de prospection en texte brut.
+3. Se connecte à l'Odoo Archi-Volt (API externe XML-RPC, clé API dans ODOO_API_KEY).
+4. Crée une activité « À faire » (type To-Do) sur la tâche « Suivi commercial »
+   avec la liste en note, échéance à la date du jour.
 
 Notes techniques :
 - Odoo 19 : mail.activity.create avec res_model_id (ir.model) + res_id,
   activity_type_id, date_deadline.
-- Le type « À faire » de l'interface FR s'appelle « To-Do » en base (id 4).
+- Le type « À faire » de l'interface FR s'appelle « To-Do » en base.
 - « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
   (la plus récente dont le début est passé).
 - Mode test : si input.note_test est fournie, la génération est sautée.
@@ -40,6 +40,9 @@ PROMPT = (
     "Nouvelle-Aquitaine qui recherchent des compétences en data gouvernance ou "
     "qui ont des difficultés ou de gros projets data (RGPD, qualité de données, "
     "IA, transformation digitale). "
+    "Appuie-toi sur les résultats de recherche web fournis (offres d'emploi, "
+    "actualités, projets annoncés) ; pour chaque entreprise, cite la source "
+    "(site / média et date) entre parenthèses après le champ Pourquoi. "
     "FORMAT DE SORTIE IMPÉRATIF : texte brut, sans aucun markdown (pas de #, "
     "pas de **, pas de tableaux, pas de puces markdown). "
     "Structure exacte : "
@@ -47,7 +50,7 @@ PROMPT = (
     "puis pour chaque entreprise, un bloc numéroté sur 4 lignes : "
     "ligne 1 : numéro. Nom - Région : ... - Secteur : ... ; "
     "ligne 2 : ligne de tirets ; "
-    "ligne 3 : 'Pourquoi : ' suivi de la raison (recrutement ou projet identifié) ; "
+    "ligne 3 : 'Pourquoi : ' suivi de la raison et de sa source entre parenthèses ; "
     "ligne 4 : 'Pertinence : X/5'. "
     "Une ligne vide entre chaque bloc. 10 entreprises maximum, en français, "
     "classées de la plus pertinente à la moins pertinente."
@@ -70,7 +73,13 @@ class OdooActivityResult(BaseModel):
 
 @workflows.activity()
 async def generer_liste_entreprises(agent_id: str) -> str:
-    """Génère la liste de prospection via un agent Mistral ou le modèle."""
+    """Recherche web puis génération de la liste de prospection.
+
+    1. Recherche web (outil natif Mistral) sur les recrutements et projets
+       data gouvernance dans les régions cibles.
+    2. Synthèse en liste structurée à partir des résultats sourcés.
+    Repli : appel simple sans recherche si l'outil web n'est pas disponible.
+    """
     from mistralai.workflows.client import get_mistral_client
 
     mistral = get_mistral_client()
@@ -83,7 +92,17 @@ async def generer_liste_entreprises(agent_id: str) -> str:
             )
             return response.choices[0].message.content
         except Exception:
-            pass  # repli sur le chat simple ci-dessous
+            pass  # repli sur la recherche web ci-dessous
+
+    try:
+        response = await mistral.chat.complete_async(
+            model="mistral-small-latest",
+            messages=[{"role": "user", "content": PROMPT}],
+            tools=[{"type": "web_search"}],
+        )
+        return response.choices[0].message.content
+    except Exception:
+        pass  # repli : sans recherche web (mémoire du modèle)
 
     response = await mistral.chat.complete_async(
         model="mistral-small-latest",
@@ -171,8 +190,8 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
         task_id = tasks[0]["id"]
 
-        # 2. Type d'activité To-Do (« À faire » en interface FR, id 4 dans
-        #    cette base). Recherche par nom exact, puis par icône fa-check,
+        # 2. Type d'activité To-Do (« À faire » en interface FR).
+        #    Recherche par nom exact, puis par icône fa-check,
         #    sinon échec explicite (jamais de repli sur Mail).
         types = call(
             "mail.activity.type",
@@ -232,9 +251,10 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
     name="prospection-odoo",
     workflow_display_name="Prospection data gouvernance -> Odoo",
     workflow_description=(
-        "Liste hebdomadaire des entreprises régionales (Bretagne, Pays de la Loire, "
-        "Normandie, Nouvelle-Aquitaine) recrutant en data gouvernance, ajoutée comme "
-        "activité « À faire » sur la tâche Odoo « Suivi commercial »."
+        "Recherche web puis liste hebdomadaire des entreprises régionales "
+        "(Bretagne, Pays de la Loire, Normandie, Nouvelle-Aquitaine) recrutant "
+        "en data gouvernance, ajoutée comme activité « À faire » sur la tâche "
+        "Odoo « Suivi commercial »."
     ),
 )
 class ProspectionOdooWorkflow:
