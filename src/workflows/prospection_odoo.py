@@ -14,6 +14,7 @@ Notes techniques :
 - « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
   (la plus récente dont le début est passé).
 - Mode test : si input.note_test est fournie, la génération est sautée.
+- Mode diagnostic : note_test = "DUMP_TYPES" -> liste les types d'activité Odoo.
 """
 
 import asyncio
@@ -91,11 +92,37 @@ async def generer_liste_entreprises(agent_id: str) -> str:
 
 def _nettoyer_note(note: str) -> str:
     """Nettoyage markdown résiduel : la note doit être du texte brut lisible."""
-    note = re.sub(r"#+\s*", "", note)                 # titres
+    note = re.sub(r"#+s*", "", note)                 # titres
     note = note.replace("**", "").replace("__", "")   # gras
-    note = re.sub(r"^\s*[-*]\s+", "- ", note, flags=re.M)  # puces -> tiret simple
-    note = re.sub(r"\n{3,}", "\n\n", note)           # lignes vides multiples
+    note = re.sub(r"^s*[-*]s+", "- ", note, flags=re.M)  # puces -> tiret simple
+    note = re.sub(r"
+{3,}", "
+
+", note)           # lignes vides multiples
     return note
+
+
+@workflows.activity()
+async def lister_types_activite(odoo_db: str, odoo_user: str) -> list:
+    """Diagnostic : liste tous les types d'activité Odoo (id, nom, catégorie, délai)."""
+    import xmlrpc.client
+
+    api_key = os.environ["ODOO_API_KEY"]
+
+    def _run() -> list:
+        common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
+        uid = common.authenticate(odoo_db, odoo_user, api_key, {})
+        if not uid:
+            raise RuntimeError("Authentification Odoo refusée (diagnostic).")
+        models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+        return models.execute_kw(
+            odoo_db, uid, api_key,
+            "mail.activity.type", "search_read",
+            [[]],
+            {"fields": ["id", "name", "category", "delay_count", "delay_unit", "active", "icon"], "order": "id"},
+        )
+
+    return await asyncio.to_thread(_run)
 
 
 @workflows.activity()
@@ -153,14 +180,14 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             [[
                 ["name", "in", [ODOO_ACTIVITY_TYPE_NAME, "Todo", "To do"]],
                 ["active", "=", True],
-            ], ["id", "name"]],
+            ], ["id", "name", "category", "icon"]],
             {"limit": 1},
         )
         if not types:
             types = call(
                 "mail.activity.type",
                 "search_read",
-                [[["active", "=", True]], ["id", "name"]],
+                [[["active", "=", True]], ["id", "name", "category", "icon"]],
                 {"limit": 1},
             )
         if not types:
@@ -213,6 +240,10 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
 class ProspectionOdooWorkflow:
     @workflows.workflow.entrypoint
     async def run(self, input: ProspectionInput) -> dict:
+        # Mode diagnostic : lister les types d'activité
+        if input.note_test == "DUMP_TYPES":
+            dump = await lister_types_activite(input.odoo_db, input.odoo_user)
+            return {"diagnostic_types": dump}
         # Mode test : note fournie -> pas de génération
         if input.note_test:
             liste = input.note_test
