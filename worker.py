@@ -1,17 +1,65 @@
-"""Point d'entrée du worker pour le déploiement géré Mistral Cloud."""
+"""Point d'entrée du worker — déploiement géré Mistral Cloud.
+
+Cherche le SDK sous tous ses noms d'import possibles puis démarre le worker.
+"""
 
 import asyncio
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+ROOT = Path(__file__).parent
+sys.path.insert(0, str(ROOT / "src"))
+
+
+def _find_sdk():
+    """Retourne le module SDK exposant run_worker / discover_workflows."""
+    import importlib
+
+    names = [
+        "mistralai_workflows",
+        "mistralai.workflows",
+        "mistralai_workflows.worker",
+        "mistralai_workflows.sdk",
+    ]
+    for n in names:
+        try:
+            mod = importlib.import_module(n)
+        except Exception:
+            continue
+        for attr in ("run_worker",):
+            if hasattr(mod, attr):
+                return mod
+    # dernier recours : chercher l'attribut dans le package mistralai
+    try:
+        import mistralai
+
+        for attr in ("run_worker", "discover_workflows"):
+            if hasattr(mistralai, attr):
+                return mistralai
+    except Exception:
+        pass
+    raise RuntimeError(
+        "SDK mistralai-workflows introuvable ; modules dispo : "
+        + ", ".join(sorted(m.name for m in __import__("pkgutil").iter_modules()))
+    )
 
 
 async def main() -> None:
-    import mistralai_workflows
-    from workflows.prospection_odoo import ProspectionOdooWorkflow
+    sdk = _find_sdk()
 
-    await mistralai_workflows.run_worker([ProspectionOdooWorkflow])
+    # Découverte automatique si disponible, sinon liste explicite
+    discovered = None
+    if hasattr(sdk, "discover_workflows"):
+        try:
+            discovered = sdk.discover_workflows()
+        except Exception:
+            discovered = None
+    if not discovered:
+        from workflows.prospection_odoo import ProspectionOdooWorkflow
+
+        discovered = [ProspectionOdooWorkflow]
+
+    await sdk.run_worker(discovered)
 
 
 if __name__ == "__main__":
