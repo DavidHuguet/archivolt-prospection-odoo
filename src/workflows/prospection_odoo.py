@@ -7,12 +7,14 @@ Chaque exécution :
 2. Se connecte à l'Odoo Archi-Volt (API JSON-RPC, clé API dans le secret ODOO_API_KEY).
 3. Crée une activité « À faire » sur la tâche « Suivi commercial » avec la
    liste en note.
+
+Note : les imports réseau (httpx) sont différés à l'intérieur des activités —
+le sandbox de workflow (Temporal) interdit les imports réseau au niveau module.
 """
 
 import os
 from datetime import date, timedelta
 
-import httpx
 import mistralai.workflows as workflows
 from pydantic import BaseModel
 
@@ -44,7 +46,9 @@ class OdooActivityResult(BaseModel):
 
 
 def _jsonrpc(url: str, service: str, method: str, args: list) -> object:
-    """Appel JSON-RPC Odoo (endpoint /jsonrpc)."""
+    """Appel JSON-RPC Odoo (endpoint /jsonrpc). httpx importé ici (pas de réseau dans le workflow)."""
+    import httpx
+
     payload = {
         "jsonrpc": "2.0",
         "method": "call",
