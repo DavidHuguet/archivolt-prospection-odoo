@@ -14,7 +14,6 @@ Notes techniques :
   le paramètre date (pas date_deadline).
 - « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
   (la plus récente dont le début est passé).
-- Odoo 17+ : planned_date_begin existe, planned_date_end non (v19).
 - Mode test : si input.note_test est fournie, la génération est sautée.
 """
 
@@ -130,19 +129,19 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
         types = call(
             "mail.activity.type",
             "search_read",
-            [
-                [["name", "in", [ODOO_ACTIVITY_TYPE_NAME, "Todo", "To do"], "active", "=", True]],
-                ["id", "name"],
-            ],
+            [[
+                ["name", "in", [ODOO_ACTIVITY_TYPE_NAME, "Todo", "To do"]],
+                ["active", "=", True],
+            ], ["id", "name"]],
             {"limit": 1},
         )
         if not types:
-            # dernier recours : types sans catégorie « email »
+            # dernier recours : le premier type actif disponible
             types = call(
                 "mail.activity.type",
                 "search_read",
-                [[["active", "=", True], ["category", "!=", "upload_file"]], ["id", "name"]],
-                {"limit": 50},
+                [[["active", "=", True]], ["id", "name"]],
+                {"limit": 1},
             )
         if not types:
             raise RuntimeError(
@@ -151,7 +150,7 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
         act_type_id = types[0]["id"]
 
         # 3. Planification de l'activité : échéance via le paramètre date
-        #    (date_deadline est ignoré par activity_schedule -> échéance = aujourd'hui)
+        #    (date_deadline est ignoré par activity_schedule)
         due = (date.today() + timedelta(days=ODOO_ACTIVITY_DELAY_DAYS)).isoformat()
         call(
             "project.task",
