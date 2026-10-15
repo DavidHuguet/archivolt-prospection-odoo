@@ -5,12 +5,14 @@ Chaque exécution :
    Normandie et Nouvelle-Aquitaine qui recherchent des compétences en data
    gouvernance ou qui ont de gros projets data.
 2. Se connecte à l'Odoo Archi-Volt (API externe XML-RPC, clé API dans ODOO_API_KEY).
-3. Crée une activité « À faire » sur la tâche « Suivi commercial » avec la
-   liste en note (texte brut lisible, pas de markdown), échéance à la date du jour.
+3. Crée une activité « À faire » (type To-Do) sur la tâche « Suivi commercial »
+   avec la liste en note (texte brut lisible, pas de markdown), échéance à la
+   date du jour.
 
 Notes techniques :
 - Odoo 19 : mail.activity.create avec res_model_id (ir.model) + res_id,
   activity_type_id, date_deadline.
+- Le type « À faire » de l'interface FR s'appelle « To-Do » en base (id 4).
 - « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
   (la plus récente dont le début est passé).
 - Mode test : si input.note_test est fournie, la génération est sautée.
@@ -27,7 +29,7 @@ from pydantic import BaseModel
 
 ODOO_URL = os.environ.get("ODOO_URL", "https://archi-volt.odoo.com").rstrip("/")
 ODOO_TASK_NAME = os.environ.get("ODOO_TASK_NAME", "Suivi commercial")
-ODOO_ACTIVITY_TYPE_NAME = os.environ.get("ODOO_ACTIVITY_TYPE_NAME", "À faire")
+ODOO_ACTIVITY_TYPE_NAME = os.environ.get("ODOO_ACTIVITY_TYPE_NAME", "To-Do")
 ODOO_ACTIVITY_DELAY_DAYS = int(os.environ.get("ODOO_ACTIVITY_DELAY_DAYS", "0"))
 GENERATION_TIMEOUT_S = int(os.environ.get("GENERATION_TIMEOUT_S", "300"))
 
@@ -124,7 +126,7 @@ async def lister_types_activite(odoo_db: str, odoo_user: str) -> list:
 
 @workflows.activity()
 async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooActivityResult:
-    """Crée une activité « À faire » sur la tâche « Suivi commercial » d'Odoo (XML-RPC)."""
+    """Crée une activité « À faire » (To-Do) sur la tâche « Suivi commercial » d'Odoo (XML-RPC)."""
     import xmlrpc.client
 
     api_key = os.environ["ODOO_API_KEY"]
@@ -169,13 +171,14 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
         task_id = tasks[0]["id"]
 
-        # 2. Type d'activité « À faire » : correspondance exacte sur le nom,
-        #    sinon Odoo imposerait son type par défaut (Mail).
+        # 2. Type d'activité To-Do (« À faire » en interface FR, id 4 dans
+        #    cette base). Recherche par nom exact, puis par icône fa-check,
+        #    sinon échec explicite (jamais de repli sur Mail).
         types = call(
             "mail.activity.type",
             "search_read",
             [[
-                ["name", "in", [ODOO_ACTIVITY_TYPE_NAME, "Todo", "To do"]],
+                ["name", "in", [ODOO_ACTIVITY_TYPE_NAME, "To Do", "Todo", "To-do", "To Do"]],
                 ["active", "=", True],
             ], ["id", "name", "category", "icon"]],
             {"limit": 1},
@@ -184,12 +187,12 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             types = call(
                 "mail.activity.type",
                 "search_read",
-                [[["active", "=", True]], ["id", "name", "category", "icon"]],
+                [[["icon", "=", "fa-check"], ["active", "=", True]], ["id", "name", "category", "icon"]],
                 {"limit": 1},
             )
         if not types:
             raise RuntimeError(
-                f"Type d'activité Odoo « {ODOO_ACTIVITY_TYPE_NAME} » introuvable"
+                "Type d'activité « À faire » (To-Do) introuvable dans Odoo"
             )
         act_type_id = types[0]["id"]
 
