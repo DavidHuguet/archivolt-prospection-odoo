@@ -8,10 +8,8 @@ Chaque exécution :
 3. Crée une activité « À faire » sur la tâche « Suivi commercial » avec la
    liste en note.
 
-Notes techniques :
-- Odoo 19 : activity_schedule déclenche un bug de cache ("unhashable type:
-  'dict'") -> on crée l'activité directement via mail.activity.create.
-- Les imports réseau sont différés dans les activités (sandbox Temporal).
+Note technique : activity_schedule prend ses paramètres en kwargs
+(summary, note, date_deadline, act_type_id...), pas en dict positionnel.
 """
 
 import os
@@ -99,13 +97,12 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
         tasks = call(
             "project.task",
             "search_read",
-            [[["name", "ilike", ODOO_TASK_NAME]], ["id", "name", "user_ids"]],
+            [[["name", "ilike", ODOO_TASK_NAME]], ["id", "name"]],
             {"limit": 1},
         )
         if not tasks:
             raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
-        task = tasks[0]
-        task_id = task["id"]
+        task_id = tasks[0]["id"]
 
         # 2. Type d'activité « À faire »
         types = call(
@@ -114,23 +111,31 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             [[["name", "ilike", ODOO_ACTIVITY_TYPE_NAME], ["active", "=", True]], ["id"]],
             {"limit": 1},
         )
-        activity_type_id = types[0]["id"] if types else False
+        act_kwargs = {"act_type_id": types[0]["id"]} if types else {}
 
-        # 3. Création directe de l'activité (contourne le bug activity_schedule Odoo 19)
+        # 3. Planification de l'activité (paramètres en kwargs, pas en positionnel)
         due = (date.today() + timedelta(days=7)).isoformat()
-        activity_id = call(
-            "mail.activity",
-            "create",
-            [{
-                "res_model": "project.task",
-                "res_id": task_id,
-                "activity_type_id": activity_type_id,
+        call(
+            "project.task",
+            "activity_schedule",
+            [[task_id]],
+            {
+                **act_kwargs,
                 "summary": "Prospection data gouvernance - entreprises régionales",
                 "note": note[:60000],
                 "date_deadline": due,
-                "user_id": uid,
-            }],
+            },
         )
+
+        # 4. Récupérer l'id de l'activité créée
+        acts = call(
+            "mail.activity",
+            "search_read",
+            [[["res_model", "=", "project.task"], ["res_id", "=", task_id]], ["id"]],
+            {"order": "id desc", "limit": 1},
+        )
+        activity_id = acts[0]["id"] if acts else 0
+
         return OdooActivityResult(activity_id=activity_id, task_id=task_id)
 
     return await asyncio.to_thread(_run)
@@ -152,6 +157,7 @@ class ProspectionOdooWorkflow:
         result = await creer_activite_odoo(liste, input.odoo_db, input.odoo_user)
         return {
             "odoo_task_id": result.task_id,
+            "activity_id": result.activity_id,
             "activite": "créée",
             "apercu_note": liste[:500],
         }
