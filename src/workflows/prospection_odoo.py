@@ -3,8 +3,9 @@
 Chaque exécution :
 1. Lance une recherche web sur les entreprises régionales (Bretagne, Pays de
    la Loire, Normandie, Nouvelle-Aquitaine) recrutant en data gouvernance ou
-   portant de gros projets data.
-2. Génère à partir des résultats une liste de prospection en texte brut.
+   portant de gros projets data — signaux des 6 derniers mois uniquement.
+2. Génère à partir des résultats une liste de prospection en texte brut avec
+   fiche entreprise (SIREN, siège, APE, effectifs, CA).
 3. Se connecte à l'Odoo Archi-Volt (API externe XML-RPC, clé API dans ODOO_API_KEY).
 4. Crée une activité « À faire » (type To-Do) sur la tâche « Suivi commercial »
    avec la liste en note, échéance à la date du jour.
@@ -42,18 +43,30 @@ PROMPT = (
     "Nouvelle-Aquitaine qui recherchent des compétences en data gouvernance ou "
     "qui ont des difficultés ou de gros projets data (RGPD, qualité de données, "
     "IA, transformation digitale). "
+    "FRAÎCHEUR OBLIGATOIRE : ne retiens que des signaux des 6 DERNIERS MOIS "
+    "(offres d'emploi data gouvernance publiées récemment, projets ou "
+    "recrutements annoncés dans les 6 derniers mois). Ignore tout signal plus "
+    "ancien. Si une information d'entreprise n'est pas vérifiable dans les "
+    "6 derniers mois, ne l'inclus pas. "
     "Appuie-toi sur les résultats de recherche web fournis (offres d'emploi, "
     "actualités, projets annoncés) ; pour chaque entreprise, cite la source "
     "(site / média et date) entre parenthèses après le champ Pourquoi. "
+    "FICHE ENTREPRISE OBLIGATOIRE : pour chaque entreprise, indique le numéro "
+    "SIREN, la ville du siège social, le code APE avec son libellé, le nombre "
+    "d'employés (dernier connu, préciser l'année) et le dernier chiffre "
+    "d'affaires connu (préciser l'année). Si une information est introuvable, "
+    "écris 'non trouvé' pour ce champ plutôt qu'une invention. "
     "FORMAT DE SORTIE IMPÉRATIF : texte brut, sans aucun markdown (pas de #, "
     "pas de **, pas de tableaux, pas de puces markdown). "
     "Structure exacte : "
     "une première ligne 'PROSPECTION DATA GOUVERNANCE - ENTREPRISES REGIONALES' ; "
-    "puis pour chaque entreprise, un bloc numéroté sur 4 lignes : "
+    "puis pour chaque entreprise, un bloc numéroté sur 7 lignes : "
     "ligne 1 : numéro. Nom - Région : ... - Secteur : ... ; "
     "ligne 2 : ligne de tirets ; "
-    "ligne 3 : 'Pourquoi : ' suivi de la raison et de sa source entre parenthèses ; "
-    "ligne 4 : 'Pertinence : X/5'. "
+    "ligne 3 : 'SIREN : ... - Siège : ... - APE : ... (libellé)' ; "
+    "ligne 4 : 'Effectifs : ... - Dernier CA : ...' ; "
+    "ligne 5 : 'Pourquoi : ' suivi de la raison et de sa source entre parenthèses ; "
+    "ligne 6 : 'Pertinence : X/5'. "
     "Une ligne vide entre chaque bloc. 10 entreprises maximum, en français, "
     "classées de la plus pertinente à la moins pertinente."
 )
@@ -78,8 +91,9 @@ async def generer_liste_entreprises(agent_id: str) -> str:
     """Recherche web puis génération de la liste de prospection.
 
     1. Recherche web (outil natif Mistral) sur les recrutements et projets
-       data gouvernance dans les régions cibles.
-    2. Synthèse en liste structurée à partir des résultats sourcés.
+       data gouvernance dans les régions cibles (6 derniers mois).
+    2. Synthèse en liste structurée avec fiche entreprise, à partir des
+       résultats sourcés.
     Repli : appel simple sans recherche si l'outil web n'est pas disponible.
     """
     from mistralai.workflows.client import get_mistral_client
