@@ -9,8 +9,8 @@ Chaque exécution :
    liste en note.
 
 Notes techniques :
-- Les clés API Odoo passent par l'API externe XML-RPC (endpoint /xmlrpc/2),
-  pas par /web/session/authenticate (login interactif -> Access Denied).
+- Odoo 19 : activity_schedule déclenche un bug de cache ("unhashable type:
+  'dict'") -> on crée l'activité directement via mail.activity.create.
 - Les imports réseau sont différés dans les activités (sandbox Temporal).
 """
 
@@ -83,48 +83,55 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
 
     def _run() -> OdooActivityResult:
         common = xmlrpc.client.ServerProxy(common_url)
-
-        # Version du serveur (diagnostic)
-        try:
-            version = common.version()
-        except Exception as e:
-            raise RuntimeError(f"Odoo injoignable sur {common_url}: {e}")
-
         uid = common.authenticate(odoo_db, odoo_user, api_key, {})
         if not uid:
             raise RuntimeError(
-                f"Authentification Odoo refusée (uid=False). "
-                f"Vérifie : nom de base='{odoo_db}', utilisateur='{odoo_user}', "
-                f"clé API (secret ODOO_API_KEY). Serveur: {version.get('server_version')}"
+                f"Authentification Odoo refusée. Vérifie : base='{odoo_db}', "
+                f"utilisateur='{odoo_user}', clé API (secret ODOO_API_KEY)."
             )
 
         models = xmlrpc.client.ServerProxy(object_url)
 
-        def call(model: str, method: str, args: list):
-            return models.execute_kw(odoo_db, uid, api_key, model, method, args)
+        def call(model: str, method: str, args: list, kwargs: dict | None = None):
+            return models.execute_kw(odoo_db, uid, api_key, model, method, args, kwargs or {})
 
         # 1. Tâche cible
-        task_ids = call("project.task", "search", [[["name", "ilike", ODOO_TASK_NAME]]])
-        if not task_ids:
-            raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
-        task_id = task_ids[0]
-
-        # 2. Type d'activité « À faire » (repli : type par défaut)
-        type_ids = call(
-            "mail.activity.type",
-            "search",
-            [[["name", "ilike", ODOO_ACTIVITY_TYPE_NAME], ["active", "=", True]]],
-        )
-        type_kw = {"activity_type_id": type_ids[0]} if type_ids else {}
-
-        # 3. Création de l'activité planifiée sous 7 jours
-        due = (date.today() + timedelta(days=7)).isoformat()
-        call(
+        tasks = call(
             "project.task",
-            "activity_schedule",
-            [[task_id], {**type_kw, "summary": "Prospection data gouvernance - entreprises régionales", "note": note[:60000], "date_deadline": due}],
+            "search_read",
+            [[["name", "ilike", ODOO_TASK_NAME]], ["id", "name", "user_ids"]],
+            {"limit": 1},
         )
-        return OdooActivityResult(activity_id=0, task_id=task_id)
+        if not tasks:
+            raise RuntimeError(f"Tâche Odoo « {ODOO_TASK_NAME} » introuvable")
+        task = tasks[0]
+        task_id = task["id"]
+
+        # 2. Type d'activité « À faire »
+        types = call(
+            "mail.activity.type",
+            "search_read",
+            [[["name", "ilike", ODOO_ACTIVITY_TYPE_NAME], ["active", "=", True]], ["id"]],
+            {"limit": 1},
+        )
+        activity_type_id = types[0]["id"] if types else False
+
+        # 3. Création directe de l'activité (contourne le bug activity_schedule Odoo 19)
+        due = (date.today() + timedelta(days=7)).isoformat()
+        activity_id = call(
+            "mail.activity",
+            "create",
+            [{
+                "res_model": "project.task",
+                "res_id": task_id,
+                "activity_type_id": activity_type_id,
+                "summary": "Prospection data gouvernance - entreprises régionales",
+                "note": note[:60000],
+                "date_deadline": due,
+                "user_id": uid,
+            }],
+        )
+        return OdooActivityResult(activity_id=activity_id, task_id=task_id)
 
     return await asyncio.to_thread(_run)
 
