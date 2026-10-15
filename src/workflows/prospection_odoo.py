@@ -6,7 +6,7 @@ Chaque exécution :
    gouvernance ou qui ont de gros projets data.
 2. Se connecte à l'Odoo Archi-Volt (API externe XML-RPC, clé API dans ODOO_API_KEY).
 3. Crée une activité « À faire » sur la tâche « Suivi commercial » avec la
-   liste en note, échéance à la date du jour.
+   liste en note (texte brut lisible, pas de markdown), échéance à la date du jour.
 
 Notes techniques :
 - Odoo 19 : mail.activity.create avec res_model_id (ir.model) + res_id,
@@ -30,12 +30,23 @@ ODOO_ACTIVITY_DELAY_DAYS = int(os.environ.get("ODOO_ACTIVITY_DELAY_DAYS", "0"))
 GENERATION_TIMEOUT_S = int(os.environ.get("GENERATION_TIMEOUT_S", "300"))
 
 PROMPT = (
-    "Liste des acteurs Bretagne, Pays de la Loire, Normandie, Nouvelle-Aquitaine "
-    "d'ETI, PME, Startup, qui recherchent des compétences en data gouvernance ou "
-    "qui ont des difficultés ou des gros projets data. "
-    "Pour chaque entreprise : nom, région, secteur, pourquoi elle est pertinente "
-    "(recrutement data gouvernance / projet data identifié), et un indice de "
-    "pertinence 1-5. Liste structurée, 10 entreprises maximum, en français."
+    "Génère une liste de prospection pour un cabinet de conseil indépendant en "
+    "data gouvernance (Archi-Volt). "
+    "Cible : ETI, PME et startups en Bretagne, Pays de la Loire, Normandie et "
+    "Nouvelle-Aquitaine qui recherchent des compétences en data gouvernance ou "
+    "qui ont des difficultés ou de gros projets data (RGPD, qualité de données, "
+    "IA, transformation digitale). "
+    "FORMAT DE SORTIE IMPÉRATIF : texte brut, sans aucun markdown (pas de #, "
+    "pas de **, pas de tableaux, pas de puces markdown). "
+    "Structure exacte : "
+    "une première ligne 'PROSPECTION DATA GOUVERNANCE - ENTREPRISES REGIONALES' ; "
+    "puis pour chaque entreprise, un bloc numéroté sur 4 lignes : "
+    "ligne 1 : numéro. Nom - Région : ... - Secteur : ... ; "
+    "ligne 2 : ligne de tirets ; "
+    "ligne 3 : 'Pourquoi : ' suivi de la raison (recrutement ou projet identifié) ; "
+    "ligne 4 : 'Pertinence : X/5'. "
+    "Une ligne vide entre chaque bloc. 10 entreprises maximum, en français, "
+    "classées de la plus pertinente à la moins pertinente."
 )
 
 
@@ -80,6 +91,7 @@ async def generer_liste_entreprises(agent_id: str) -> str:
 @workflows.activity()
 async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooActivityResult:
     """Crée une activité « À faire » sur la tâche « Suivi commercial » d'Odoo (XML-RPC)."""
+    import re
     import xmlrpc.client
 
     api_key = os.environ["ODOO_API_KEY"]
@@ -99,6 +111,12 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
 
         def call(model: str, method: str, args: list, kwargs: dict | None = None):
             return models.execute_kw(odoo_db, uid, api_key, model, method, args, kwargs or {})
+
+        # 0. Nettoyage markdown résiduel : la note doit être du texte brut lisible
+        note = re.sub(r"#+\s*", "", note)              # titres
+        note = note.replace("**", "").replace("__", "")  # gras
+        note = re.sub(r"^\s*[-*]\s+", "- ", note, flags=re.M)  # puces -> tiret simple
+        note = re.sub(r"\n{3,}", "\n\n", note)          # lignes vides multiples
 
         # 1. Tâche cible : occurrence EN COURS de la tâche récurrente.
         #    La plus récente dont le début est passé.
