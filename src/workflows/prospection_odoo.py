@@ -12,6 +12,7 @@ Notes techniques :
 - activity_schedule prend ses paramètres en kwargs.
 - « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
   (période planifiée incluant aujourd'hui), pas une ancienne occurrence.
+- Odoo 17+ : les dates de tâche sont planned_date_begin / planned_date_end.
 """
 
 import os
@@ -103,8 +104,8 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
             "search_read",
             [[
                 ["name", "ilike", ODOO_TASK_NAME],
-                ["date_start", "<=", f"{today} 23:59:59"],
-                ["date_end", ">=", f"{today} 00:00:00"],
+                ["planned_date_begin", "<=", f"{today} 23:59:59"],
+                ["planned_date_end", ">=", f"{today} 00:00:00"],
             ], ["id", "name"]],
             {"limit": 1, "order": "id desc"},
         )
