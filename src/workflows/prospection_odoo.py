@@ -45,9 +45,14 @@ PROMPT = (
     "data gouvernance (Archi-Volt). "
     "CIBLE STRICTE : uniquement des ETI, PME et startups dont le siège ou "
     "l'établissement concerné se situe en Bretagne, Pays de la Loire, Normandie "
-    "ou Nouvelle-Aquitaine. EXCLUS : administrations publiques, ministères, "
-    "collectivités, et toute entreprise dont le site concerné est hors de "
-    "ces 4 régions (notamment Centre-Val de Loire, Île-de-France). "
+    "ou Nouvelle-Aquitaine. "
+    "EXCLUS ABSOLUMENT : administrations publiques, ministères, collectivités "
+    "territoriales, métropoles, communautés d'agglomération, conseils "
+    "régionaux/départementaux, associations, fédérations professionnelnelles, "
+    "organismes publics — et toute entreprise dont le site concerné est hors "
+    "de ces 4 régions (notamment Centre-Val de Loire, Île-de-France). "
+    "Un seul hors-cible décrédibilise toute la liste : quand tu hésites sur "
+    "une entreprise, exclue-la. "
     "Signaux recherchés : entreprises recrutant des compétences en data "
     "gouvernance / data management / DPO / data quality, ou portant de gros "
     "projets data (RGPD, qualité de données, IA, transformation digitale). "
@@ -56,11 +61,20 @@ PROMPT = (
     "dans les 6 derniers mois). Ignore tout signal plus ancien. Si une "
     "information d'entreprise n'est pas vérifiable dans les 6 derniers mois, "
     "ne l'inclus pas. "
-    "NOMBRE OBLIGATOIRE : la liste doit contenir EXACTEMENT 10 entreprises. "
-    "Si tu en trouves moins de 10 respectant tous les critères, mène des "
-    "recherches supplémentaires (autres régions cibles, autres mots-clés : "
-    "data governance, data manager, DPO, CIL, data quality, RGPD, référent "
-    "données) jusqu'à atteindre 10. Ne raccourcis pas la liste. "
+    "NOMBRE ET PRIORITE : objectif 10 entreprises, mais LA QUALITÉ PRIME SUR "
+    "LE NOMBRE. Ne JAMAIS inclure une entreprise qui viole un critère "
+    "(région, type, fraîcheur) pour atteindre le quota. Mène d'abord des "
+    "recherches complémentaires (autres mots-clés : data governance, data "
+    "manager, DPO, CIL, data quality, RGPD, référent données ; autres villes "
+    "des 4 régions : Rennes, Nantes, Brest, Caen, Rouen, Le Havre, Angers, "
+    "Tours est HORS ZONE, Bordeaux, Bayonne, Pau, Limoges, La Rochelle, "
+    "Quimper, Vannes, Laval, Le Mans, Cherbourg). "
+    "Si après ces recherches tu ne trouves que 6 à 8 entreprises conformes, "
+    "c'est acceptable : liste-les toutes. Mieux vaut 7 cibles parfaites que "
+    "10 dont certaines hors-cible. "
+    "AUCUN DOUBLON : jamais deux fois le même SIREN ni deux entités du même "
+    "groupe (ex. si une filiale est déjà listée, ne liste pas la maison mère "
+    "ni une autre filiale avec le même SIREN). "
     "Appuie-toi sur les résultats de ta recherche web (offres d'emploi, "
     "actualités, projets annoncés) ; pour chaque entreprise, cite la source "
     "(site / média et date) entre parenthèses après le champ Pourquoi. "
@@ -121,9 +135,13 @@ async def generer_liste_entreprises(agent_id: str) -> str:
             "Tu es un assistant de prospection B2B pour Archi-Volt, cabinet de "
             "conseil indépendant en data gouvernance. Utilise la recherche web "
             "pour trouver des signaux récents (6 derniers mois) : offres d'emploi, "
-            "annonces de projets, actualités. Cible uniquement des ETI/PME/startups "
-            "de Bretagne, Pays de la Loire, Normandie, Nouvelle-Aquitaine — "
-            "jamais d'administrations ni de sites hors de ces régions. "
+            "annonces de projets, actualités. "
+            "ENTREPRISES PRIVÉES UNIQUEMENT (ETI/PME/startups) : jamais "
+            "d'administrations, de collectivités, d'associations ni d'organismes "
+            "publics. Strictement en Bretagne, Pays de la Loire, Normandie, "
+            "Nouvelle-Aquitaine — jamais de Centre-Val de Loire ni d'Île-de-France. "
+            "La qualité prime sur le nombre : mieux vaut 6 cibles parfaites que "
+            "10 dont une hors-cible. Jamais de doublons (même SIREN). "
             "Réponds toujours en texte brut structuré, sans markdown, avec les "
             "sources citées."
         ),
@@ -146,10 +164,13 @@ async def generer_liste_entreprises(agent_id: str) -> str:
 
 def _nettoyer_note(note: str) -> str:
     """Nettoyage markdown résiduel : la note doit être du texte brut lisible."""
-    note = re.sub(r"#+\s*", "", note)
+    note = re.sub(r"#+s*", "", note)
     note = note.replace("**", "").replace("__", "")
-    note = re.sub(r"^[ \t]*[-*][ \t]+", "- ", note, flags=re.M)
-    note = re.sub(r"\n{3,}", "\n\n", note)
+    note = re.sub(r"^[ 	]*[-*][ 	]+", "- ", note, flags=re.M)
+    note = re.sub(r"
+{3,}", "
+
+", note)
     return note
 
 
