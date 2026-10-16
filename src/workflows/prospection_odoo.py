@@ -14,11 +14,11 @@ Chaque exécution :
 Notes techniques :
 - Recherche web : agent workflows (mistralai.workflows.plugins.mistralai)
   avec WebSearchTool() et RemoteSession (LocalSession ignorerait l'outil).
+- Activité de génération : start_to_close_timeout 900 s, UNE seule tentative
+  (retry 1) pour éviter les boucles de rejou Temporal de 60 min.
 - Odoo 19 : mail.activity.create avec res_model_id (ir.model) + res_id,
   activity_type_id, date_deadline.
 - Le type « À faire » de l'interface FR s'appelle « To-Do » en base.
-- « Suivi commercial » est une tâche récurrente : on cible l'occurrence EN COURS
-  (la plus récente dont le début est passé).
 - Mode test : si input.note_test est fournie, la génération est sautée.
 - Mode diagnostic : note_test = "DUMP_TYPES" -> liste les types d'activité Odoo.
 - Mode génération seule : note_test = "GEN_ONLY" -> renvoie la liste générée
@@ -37,7 +37,7 @@ ODOO_URL = os.environ.get("ODOO_URL", "https://archi-volt.odoo.com").rstrip("/")
 ODOO_TASK_NAME = os.environ.get("ODOO_TASK_NAME", "Suivi commercial")
 ODOO_ACTIVITY_TYPE_NAME = os.environ.get("ODOO_ACTIVITY_TYPE_NAME", "To-Do")
 ODOO_ACTIVITY_DELAY_DAYS = int(os.environ.get("ODOO_ACTIVITY_DELAY_DAYS", "0"))
-GENERATION_TIMEOUT_S = int(os.environ.get("GENERATION_TIMEOUT_S", "600"))
+GENERATION_TIMEOUT_S = int(os.environ.get("GENERATION_TIMEOUT_S", "840"))
 GEN_MODEL = os.environ.get("GEN_MODEL", "mistral-medium-latest")
 
 PROMPT = (
@@ -51,38 +51,29 @@ PROMPT = (
     "régionaux/départementaux, associations, fédérations professionnelnelles, "
     "organismes publics — et toute entreprise dont le site concerné est hors "
     "de ces 4 régions (notamment Centre-Val de Loire, Île-de-France). "
-    "Un seul hors-cible décrédibilise toute la liste : quand tu hésites sur "
-    "une entreprise, exclue-la. "
+    "Quand tu hésites sur une entreprise, exclue-la. "
     "Signaux recherchés : entreprises recrutant des compétences en data "
     "gouvernance / data management / DPO / data quality, ou portant de gros "
     "projets data (RGPD, qualité de données, IA, transformation digitale). "
-    "FRAÎCHEUR OBLIGATOIRE : ne retiens que des signaux des 6 DERNIERS MOIS "
-    "(offres d'emploi publiées récemment, projets ou recrutements annoncés "
-    "dans les 6 derniers mois). Ignore tout signal plus ancien. Si une "
-    "information d'entreprise n'est pas vérifiable dans les 6 derniers mois, "
-    "ne l'inclus pas. "
-    "NOMBRE ET PRIORITE : objectif 10 entreprises, mais LA QUALITÉ PRIME SUR "
-    "LE NOMBRE. Ne JAMAIS inclure une entreprise qui viole un critère "
-    "(région, type, fraîcheur) pour atteindre le quota. Mène d'abord des "
-    "recherches complémentaires (autres mots-clés : data governance, data "
-    "manager, DPO, CIL, data quality, RGPD, référent données ; autres villes "
-    "des 4 régions : Rennes, Nantes, Brest, Caen, Rouen, Le Havre, Angers, "
-    "Tours est HORS ZONE, Bordeaux, Bayonne, Pau, Limoges, La Rochelle, "
-    "Quimper, Vannes, Laval, Le Mans, Cherbourg). "
-    "Si après ces recherches tu ne trouves que 6 à 8 entreprises conformes, "
-    "c'est acceptable : liste-les toutes. Mieux vaut 7 cibles parfaites que "
-    "10 dont certaines hors-cible. "
+    "FRAÎCHEUR OBLIGATOIRE : ne retiens que des signaux des 6 DERNIERS MOIS. "
+    "Ignore tout signal plus ancien. "
+    "NOMBRE ET EFFICACITÉ : vise 6 à 10 entreprises conformes. La qualité prime "
+    "sur le nombre : ne JAMAIS inclure une entreprise qui viole un critère pour "
+    "gonfler la liste. Limite-toi à une dizaine de recherches web au total "
+    "(par exemple 4-5 recherches d'offres d'emploi data par région, puis 1 "
+    "recherche par entreprise pour sa fiche). Pas de recherche exhaustive : "
+    "une fiche incomplète (« non trouvé ») est acceptable. "
     "AUCUN DOUBLON : jamais deux fois le même SIREN ni deux entités du même "
-    "groupe (ex. si une filiale est déjà listée, ne liste pas la maison mère "
-    "ni une autre filiale avec le même SIREN). "
+    "groupe. "
     "Appuie-toi sur les résultats de ta recherche web (offres d'emploi, "
     "actualités, projets annoncés) ; pour chaque entreprise, cite la source "
     "(site / média et date) entre parenthèses après le champ Pourquoi. "
-    "FICHE ENTREPRISE OBLIGATOIRE : pour chaque entreprise, recherche son "
-    "numéro SIREN, la ville du siège social, son code APE avec son libellé, "
-    "son nombre d'employés (dernier connu, préciser l'année) et son dernier "
-    "chiffre d'affaires connu (préciser l'année). Si une information est "
-    "introuvable, écris 'non trouvé' pour ce champ plutôt qu'une invention. "
+    "FICHE ENTREPRISE : pour chaque entreprise, indique son numéro SIREN, la "
+    "ville du siège social, son code APE avec son libellé, son nombre "
+    "d'employés (dernier connu, préciser l'année) et son dernier chiffre "
+    "d'affaires connu (préciser l'année). Si une information est introuvable "
+    "dans les résultats déjà obtenus, écris 'non trouvé' pour ce champ plutôt "
+    "qu'une invention (ne fais pas de recherche dédiée par champ manquant). "
     "FORMAT DE SORTIE IMPÉRATIF : texte brut, sans aucun markdown (pas de #, "
     "pas de **, pas de tableaux, pas de puces markdown). "
     "Structure exacte : "
@@ -113,13 +104,14 @@ class OdooActivityResult(BaseModel):
     task_id: int = 0
 
 
-@workflows.activity()
+@workflows.activity(
+    start_to_close_timeout=timedelta(seconds=900),
+    retry_policy_max_attempts=1,
+)
 async def generer_liste_entreprises(agent_id: str) -> str:
     """Génération de la liste de prospection avec recherche web réelle.
 
-    Utilise un agent workflows avec WebSearchTool() via RemoteSession :
-    l'outil de recherche est exécuté côté plateforme Mistral. En cas d'échec,
-    erreur explicite (pas de repli mémoire silencieux).
+    Timeout 900 s, une seule tentative : pas de rejou en boucle.
     """
     import mistralai.workflows.plugins.mistralai as workflows_mistralai
     from mistralai.client.models import WebSearchTool
@@ -140,8 +132,9 @@ async def generer_liste_entreprises(agent_id: str) -> str:
             "d'administrations, de collectivités, d'associations ni d'organismes "
             "publics. Strictement en Bretagne, Pays de la Loire, Normandie, "
             "Nouvelle-Aquitaine — jamais de Centre-Val de Loire ni d'Île-de-France. "
-            "La qualité prime sur le nombre : mieux vaut 6 cibles parfaites que "
-            "10 dont une hors-cible. Jamais de doublons (même SIREN). "
+            "Sois efficace : une dizaine de recherches maximum au total, vise 6 à "
+            "10 entreprises conformes, la qualité prime sur le nombre, jamais de "
+            "doublons (même SIREN). "
             "Réponds toujours en texte brut structuré, sans markdown, avec les "
             "sources citées."
         ),
@@ -164,13 +157,10 @@ async def generer_liste_entreprises(agent_id: str) -> str:
 
 def _nettoyer_note(note: str) -> str:
     """Nettoyage markdown résiduel : la note doit être du texte brut lisible."""
-    note = re.sub(r"#+s*", "", note)
+    note = re.sub(r"#+\s*", "", note)
     note = note.replace("**", "").replace("__", "")
-    note = re.sub(r"^[ 	]*[-*][ 	]+", "- ", note, flags=re.M)
-    note = re.sub(r"
-{3,}", "
-
-", note)
+    note = re.sub(r"^[ \t]*[-*][ \t]+", "- ", note, flags=re.M)
+    note = re.sub(r"\n{3,}", "\n\n", note)
     return note
 
 
@@ -320,24 +310,13 @@ class ProspectionOdooWorkflow:
             return {"diagnostic_types": dump}
         # Mode génération seule : liste renvoyée, rien d'écrit dans Odoo
         if input.note_test == "GEN_ONLY":
-            try:
-                liste = await asyncio.wait_for(generer_liste_entreprises(input.agent_id), timeout=GENERATION_TIMEOUT_S)
-            except asyncio.TimeoutError:
-                raise RuntimeError(
-                    f"Génération interrompue : dépassé {GENERATION_TIMEOUT_S}s."
-                )
+            liste = await generer_liste_entreprises(input.agent_id)
             return {"generation_seule": liste}
         # Mode test : note fournie -> pas de génération
         if input.note_test:
             liste = input.note_test
         else:
-            try:
-                liste = await asyncio.wait_for(generer_liste_entreprises(input.agent_id), timeout=GENERATION_TIMEOUT_S)
-            except asyncio.TimeoutError:
-                raise RuntimeError(
-                    f"Génération de la liste interrompue : dépassé {GENERATION_TIMEOUT_S}s. "
-                    "Relance l'exécution ou augmente GENERATION_TIMEOUT_S."
-                )
+            liste = await generer_liste_entreprises(input.agent_id)
         result = await creer_activite_odoo(liste, input.odoo_db, input.odoo_user)
         return {
             "odoo_task_id": result.task_id,
