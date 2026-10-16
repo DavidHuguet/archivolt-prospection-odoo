@@ -21,6 +21,7 @@ Notes techniques :
   activity_type_id, date_deadline.
 - Le type « À faire » de l'interface FR s'appelle « To-Do » en base.
 - Mode diagnostic : note_test = "DUMP_TYPES" -> liste les types d'activité Odoo.
+- Mode nettoyage : note_test = "CLEANUP" -> supprime les activités de test Odoo.
 - Mode génération seule : note_test = "GEN_ONLY" -> renvoie la liste générée
   (avec recherche web) sans rien écrire dans Odoo (2 entreprises par défaut,
   passer nb_entreprises pour changer).
@@ -60,7 +61,7 @@ PROMPT_MODELE = (
     "NOMBRE CIBLE : {nb} entreprises. La qualité prime sur le nombre : ne "
     "JAMAIS inclure une entreprise qui viole un critère pour gonfler la liste. "
     "Si tu trouves moins de {nb} entreprises strictement conformes, liste "
-    "celules trouvées sans inventer. "
+    "celles trouvées sans inventer. "
     "AUCUN DOUBLON : jamais deux fois le même SIREN ni deux entités du même "
     "groupe. "
     "Appuie-toi sur les résultats de ta recherche web (offres d'emploi, "
@@ -160,6 +161,72 @@ def _nettoyer_note(note: str) -> str:
     note = re.sub(r"^[ \t]*[-*][ \t]+", "- ", note, flags=re.M)
     note = re.sub(r"\n{3,}", "\n\n", note)
     return note
+
+
+@workflows.activity()
+async def nettoyer_activites_test(odoo_db: str, odoo_user: str) -> dict:
+    """Supprime les activités de test sur la tâche « Suivi commercial » (occurrence en cours).
+
+    Cible : activités dont le résumé contient 'TEST' ou 'Prospection data
+    gouvernance' (créées pendant la phase de test du workflow), ou la note
+    contient 'TEST' ou 'DUMP_TYPES'. Ne touche à rien d'autre.
+    """
+    import xmlrpc.client
+
+    api_key = os.environ["ODOO_API_KEY"]
+
+    def _run() -> dict:
+        common = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/common")
+        uid = common.authenticate(odoo_db, odoo_user, api_key, {})
+        if not uid:
+            raise RuntimeError("Authentification Odoo refusée (nettoyage).")
+        models = xmlrpc.client.ServerProxy(f"{ODOO_URL}/xmlrpc/2/object")
+
+        def call(model, method, args, kwargs=None):
+            return models.execute_kw(odoo_db, uid, api_key, model, method, args, kwargs or {})
+
+        today = date.today().isoformat()
+        tasks = call(
+            "project.task", "search_read",
+            [[["name", "ilike", ODOO_TASK_NAME],
+              ["planned_date_begin", "<=", f"{today} 23:59:59"]],
+             ["id", "name"]],
+            {"limit": 1, "order": "planned_date_begin desc"},
+        )
+        if not tasks:
+            return {"supprimees": 0, "detail": "tâche introuvable"}
+        task_id = tasks[0]["id"]
+
+        model_ids = call(
+            "ir.model", "search_read",
+            [[["model", "=", "project.task"]], ["id"]],
+            {"limit": 1},
+        )
+        if not model_ids:
+            return {"supprimees": 0, "detail": "ir.model introuvable"}
+        res_model_id = model_ids[0]["id"]
+
+        acts = call(
+            "mail.activity", "search_read",
+            [[
+                ["res_model_id", "=", res_model_id],
+                ["res_id", "=", task_id],
+                "|",
+                    ["summary", "like", "TEST"],
+                    "|",
+                        ["summary", "like", "Prospection data gouvernance"],
+                        "|",
+                            ["note", "like", "TEST"],
+                            ["note", "like", "DUMP_TYPES"],
+            ], ["id", "summary"]],
+            {},
+        )
+        ids = [a["id"] for a in acts]
+        if ids:
+            call("mail.activity", "unlink", [ids])
+        return {"supprimees": len(ids), "ids": ids, "task_id": task_id}
+
+    return await asyncio.to_thread(_run)
 
 
 @workflows.activity()
@@ -302,6 +369,9 @@ async def creer_activite_odoo(note: str, odoo_db: str, odoo_user: str) -> OdooAc
 class ProspectionOdooWorkflow:
     @workflows.workflow.entrypoint
     async def run(self, input: ProspectionInput) -> dict:
+        # Mode nettoyage : suppression des activités de test
+        if input.note_test == "CLEANUP":
+            return await nettoyer_activites_test(input.odoo_db, input.odoo_user)
         # Mode diagnostic : lister les types d'activité
         if input.note_test == "DUMP_TYPES":
             dump = await lister_types_activite(input.odoo_db, input.odoo_user)
