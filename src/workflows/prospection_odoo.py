@@ -14,15 +14,16 @@ Chaque exécution :
 Notes techniques :
 - Recherche web : agent workflows (mistralai.workflows.plugins.mistralai)
   avec WebSearchTool() et RemoteSession (LocalSession ignorerait l'outil).
-- Activité de génération : start_to_close_timeout 900 s, UNE seule tentative
-  (retry 1) pour éviter les boucles de rejou Temporal de 60 min.
+- Activité de génération : start_to_close_timeout 1200 s (prod = 15 fiches),
+  UNE seule tentative (retry 1) pour éviter les boucles Temporal de 60 min.
+- Nombre d'entreprises : input.nb_entreprises (15 en prod, 2 en test GEN_ONLY).
 - Odoo 19 : mail.activity.create avec res_model_id (ir.model) + res_id,
   activity_type_id, date_deadline.
 - Le type « À faire » de l'interface FR s'appelle « To-Do » en base.
-- Mode test : si input.note_test est fournie, la génération est sautée.
 - Mode diagnostic : note_test = "DUMP_TYPES" -> liste les types d'activité Odoo.
 - Mode génération seule : note_test = "GEN_ONLY" -> renvoie la liste générée
-  (avec recherche web) sans rien écrire dans Odoo.
+  (avec recherche web) sans rien écrire dans Odoo (2 entreprises par défaut,
+  passer nb_entreprises pour changer).
 """
 
 import asyncio
@@ -37,10 +38,9 @@ ODOO_URL = os.environ.get("ODOO_URL", "https://archi-volt.odoo.com").rstrip("/")
 ODOO_TASK_NAME = os.environ.get("ODOO_TASK_NAME", "Suivi commercial")
 ODOO_ACTIVITY_TYPE_NAME = os.environ.get("ODOO_ACTIVITY_TYPE_NAME", "To-Do")
 ODOO_ACTIVITY_DELAY_DAYS = int(os.environ.get("ODOO_ACTIVITY_DELAY_DAYS", "0"))
-GENERATION_TIMEOUT_S = int(os.environ.get("GENERATION_TIMEOUT_S", "840"))
 GEN_MODEL = os.environ.get("GEN_MODEL", "mistral-medium-latest")
 
-PROMPT = (
+PROMPT_MODELE = (
     "Génère une liste de prospection pour un cabinet de conseil indépendant en "
     "data gouvernance (Archi-Volt). "
     "CIBLE STRICTE : uniquement des ETI, PME et startups dont le siège ou "
@@ -57,12 +57,10 @@ PROMPT = (
     "projets data (RGPD, qualité de données, IA, transformation digitale). "
     "FRAÎCHEUR OBLIGATOIRE : ne retiens que des signaux des 6 DERNIERS MOIS. "
     "Ignore tout signal plus ancien. "
-    "NOMBRE ET EFFICACITÉ : vise 6 à 10 entreprises conformes. La qualité prime "
-    "sur le nombre : ne JAMAIS inclure une entreprise qui viole un critère pour "
-    "gonfler la liste. Limite-toi à une dizaine de recherches web au total "
-    "(par exemple 4-5 recherches d'offres d'emploi data par région, puis 1 "
-    "recherche par entreprise pour sa fiche). Pas de recherche exhaustive : "
-    "une fiche incomplète (« non trouvé ») est acceptable. "
+    "NOMBRE CIBLE : {nb} entreprises. La qualité prime sur le nombre : ne "
+    "JAMAIS inclure une entreprise qui viole un critère pour gonfler la liste. "
+    "Si tu trouves moins de {nb} entreprises strictement conformes, liste "
+    "celules trouvées sans inventer. "
     "AUCUN DOUBLON : jamais deux fois le même SIREN ni deux entités du même "
     "groupe. "
     "Appuie-toi sur les résultats de ta recherche web (offres d'emploi, "
@@ -73,7 +71,7 @@ PROMPT = (
     "d'employés (dernier connu, préciser l'année) et son dernier chiffre "
     "d'affaires connu (préciser l'année). Si une information est introuvable "
     "dans les résultats déjà obtenus, écris 'non trouvé' pour ce champ plutôt "
-    "qu'une invention (ne fais pas de recherche dédiée par champ manquant). "
+    "qu'une invention (pas de recherche dédiée par champ manquant). "
     "FORMAT DE SORTIE IMPÉRATIF : texte brut, sans aucun markdown (pas de #, "
     "pas de **, pas de tableaux, pas de puces markdown). "
     "Structure exacte : "
@@ -97,6 +95,7 @@ class ProspectionInput(BaseModel):
     odoo_user: str = ""
     agent_id: str = ""
     note_test: str = ""  # mode test : si remplie, saute la génération
+    nb_entreprises: int = 15  # 15 en prod ; GEN_ONLY force 2 sauf si fourni
 
 
 class OdooActivityResult(BaseModel):
@@ -105,17 +104,18 @@ class OdooActivityResult(BaseModel):
 
 
 @workflows.activity(
-    start_to_close_timeout=timedelta(seconds=900),
+    start_to_close_timeout=timedelta(seconds=1200),
     retry_policy_max_attempts=1,
 )
-async def generer_liste_entreprises(agent_id: str) -> str:
+async def generer_liste_entreprises(agent_id: str, nb: int) -> str:
     """Génération de la liste de prospection avec recherche web réelle.
 
-    Timeout 900 s, une seule tentative : pas de rejou en boucle.
+    Timeout 1200 s (prod = 15 fiches), une seule tentative.
     """
     import mistralai.workflows.plugins.mistralai as workflows_mistralai
     from mistralai.client.models import WebSearchTool
 
+    prompt = PROMPT_MODELE.replace("{nb}", str(nb))
     agent = workflows_mistralai.Agent(
         id=agent_id or None,
         model=GEN_MODEL,
@@ -132,9 +132,7 @@ async def generer_liste_entreprises(agent_id: str) -> str:
             "d'administrations, de collectivités, d'associations ni d'organismes "
             "publics. Strictement en Bretagne, Pays de la Loire, Normandie, "
             "Nouvelle-Aquitaine — jamais de Centre-Val de Loire ni d'Île-de-France. "
-            "Sois efficace : une dizaine de recherches maximum au total, vise 6 à "
-            "10 entreprises conformes, la qualité prime sur le nombre, jamais de "
-            "doublons (même SIREN). "
+            "La qualité prime sur le nombre, jamais de doublons (même SIREN). "
             "Réponds toujours en texte brut structuré, sans markdown, avec les "
             "sources citées."
         ),
@@ -143,7 +141,7 @@ async def generer_liste_entreprises(agent_id: str) -> str:
     session = workflows_mistralai.RemoteSession()
     outputs = await workflows_mistralai.Runner.run(
         agent=agent,
-        inputs=PROMPT,
+        inputs=prompt,
         session=session,
     )
     # Runner.run renvoie les outputs de l'agent : texte final
@@ -308,15 +306,19 @@ class ProspectionOdooWorkflow:
         if input.note_test == "DUMP_TYPES":
             dump = await lister_types_activite(input.odoo_db, input.odoo_user)
             return {"diagnostic_types": dump}
-        # Mode génération seule : liste renvoyée, rien d'écrit dans Odoo
+        # Mode génération seule : liste renvoyée, rien d'écrit dans Odoo.
+        # Test léger : 2 entreprises par défaut (nb_entreprises pour changer).
         if input.note_test == "GEN_ONLY":
-            liste = await generer_liste_entreprises(input.agent_id)
+            nb = input.nb_entreprises if input.nb_entreprises > 0 else 2
+            liste = await generer_liste_entreprises(input.agent_id, nb)
             return {"generation_seule": liste}
         # Mode test : note fournie -> pas de génération
         if input.note_test:
             liste = input.note_test
         else:
-            liste = await generer_liste_entreprises(input.agent_id)
+            # Production : 15 entreprises
+            nb = input.nb_entreprises if input.nb_entreprises > 0 else 15
+            liste = await generer_liste_entreprises(input.agent_id, nb)
         result = await creer_activite_odoo(liste, input.odoo_db, input.odoo_user)
         return {
             "odoo_task_id": result.task_id,
